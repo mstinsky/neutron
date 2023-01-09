@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    Add a new configuration option ``enable_distributed_ipv6`` in the ``[ovn]``
+    section (default: ``False``) to enable distributed IPv6.
+    When enabled, IPv6 GUA addresses are processed locally on
+    compute nodes rather than routing through the centralized gateway, reducing
+    network hops. This requires proper configuration of physical network
+    mappings (ovn-bridge-mappings) on all compute nodes.

@@ -1281,6 +1281,8 @@ class OVNMechanismDriver(api.MechanismDriver):
 
         nat = self.nb_ovn.db_find('NAT',
                                   ('logical_port', '=', port_id),
+                                  ('external_ids', '!=',
+                                   {ovn_const.OVN_FIP_EXT_ID_KEY: ''}),
                                   ('type', '=', 'dnat_and_snat')).execute()
         if not nat:
             return

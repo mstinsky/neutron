@@ -659,6 +659,8 @@ class OVNClient:
 
             self._qos_driver.create_port(context, txn, port, port_cmd)
 
+            self.create_distributed_ipv6(port, txn)
+
         db_rev.bump_revision(context, port, ovn_const.TYPE_PORTS)
 
     def _set_unset_virtual_port_type(self, context, txn, parent_port,
@@ -825,6 +827,8 @@ class OVNClient:
                 # We need to remove the old entries
                 self.add_txns_to_remove_port_dns_records(txn, port_object)
 
+            self.create_distributed_ipv6(port, txn)
+
         if check_rev_cmd.result == ovn_const.TXN_COMMITTED:
             db_rev.bump_revision(context, port, ovn_const.TYPE_PORTS)
 
@@ -835,6 +839,8 @@ class OVNClient:
         network_id = utils.get_neutron_name(ovn_network_name)
 
         with self._nb_idl.transaction(check_error=True) as txn:
+            self._delete_distributed_ipv6_by_port(port_object, txn)
+
             txn.add(self._nb_idl.delete_lswitch_port(
                 port_id, ovn_network_name))
 
@@ -1907,6 +1913,9 @@ class OVNClient:
                         self._update_lrouter_port(context, router_port,
                                                   txn=txn)
 
+            self._update_dvr_nat_ipv6(
+                context, router['id'], port['id'], True, txn)
+
         db_rev.bump_revision(context, port, ovn_const.TYPE_ROUTER_PORTS)
 
     def _update_lrouter_port(self, context, port, if_exists=False, txn=None):
@@ -2013,6 +2022,7 @@ class OVNClient:
                 # If the router is gone, the router port is also gone
                 port_removed = True
 
+            self._update_dvr_nat_ipv6(context, router_id, port_id, False, txn)
             if not router or not gw_ports:
                 if port_removed:
                     self._delete_lrouter_port(context, port_id, router_id,
@@ -3140,3 +3150,186 @@ class OVNClient:
         self._create_ovn_fair_meter(meter_name, from_reload, txn)
         self._create_ovn_fair_meter(meter_name, from_reload, txn,
                                     stateless=True)
+
+    def _check_duplicated_ipv6_rule(self, port, rules):
+        return any(rule['port'] == port for rule in rules)
+
+    def _find_ipv6_nat_rule(self, lrouter_name, ipv6_addr):
+        lrouter_nats = self._nb_idl.get_lrouter_nat_rules(
+            lrouter_name, 'dnat_and_snat', ipv6_addr, ipv6_addr)
+        return next(iter(lrouter_nats), None)
+
+    def _update_dvr_nat_ipv6(self, context, router_id, port_id, create_rule,
+                             txn):
+        """Update the VM IPv6 NAT rule attached to the router port
+
+        Update the ipv6 nat rule when the VM subnet is updated on
+        the router port.
+
+        :param context: Neutron request context.
+        :param router_id: Router ID.
+        :param port_id: Port ID
+        :param create_rule: create_rule event - True or False.
+        :param txn: The ovsdbapp transaction object.
+        """
+        if not ovn_conf.is_ovn_distributed_ipv6():
+            return
+        admin_context = context.elevated()
+        if router_id is None:
+            router_port = self._plugin.get_port(admin_context, port_id)
+            router_id = router_port['device_id']
+
+        filters = {'device_id': [router_id]}
+        router_ports = self._plugin.get_ports(admin_context, filters=filters)
+        db_ipv6s = []
+        # Get the Neutron ports linked to each router network and filter by
+        # device owner compute with ipv6_address_mode on the subnet
+        for router_port in router_ports:
+            filters = dict(network_id=[router_port['network_id']])
+            db_ports = self._plugin.get_ports(admin_context, filters=filters)
+            for port in db_ports:
+                if not port.get('device_owner', '').startswith(
+                        const.DEVICE_OWNER_COMPUTE_PREFIX):
+                    continue
+                for ip in port.get('fixed_ips', []):
+                    subnet = self._plugin.get_subnet(admin_context,
+                                                     ip['subnet_id'])
+                    if subnet and subnet['ipv6_address_mode'] is not None:
+                        # The router can have both IPv4 and IPv6 subnet linked
+                        # to the same 'VM' port, make sure we don't insert it
+                        # twice.
+                        if not self._check_duplicated_ipv6_rule(
+                                port, db_ipv6s):
+                            db_ipv6s.append({'ip': ip['ip_address'],
+                                             'port': port})
+
+        gw_lrouter_name = utils.ovn_name(router_id)
+        for db_ipv6 in db_ipv6s:
+            if create_rule:
+                db_port = db_ipv6['port']
+                # Skip the previously existing rule if for some reason it is
+                # already applied
+                if self._find_ipv6_nat_rule(gw_lrouter_name, db_ipv6['ip']):
+                    continue
+                # Set the NAT external_ids with the port information
+                ext_ids = {
+                    ovn_const.OVN_PORT_EXT_ID_KEY: db_port['id'],
+                    ovn_const.OVN_DEVID_EXT_ID_KEY: db_port['device_id'],
+                    ovn_const.OVN_NETWORK_NAME_EXT_ID_KEY:
+                        utils.ovn_name(db_port['network_id']),
+                    ovn_const.OVN_ROUTER_NAME_EXT_ID_KEY: gw_lrouter_name}
+                columns = {'type': 'dnat_and_snat',
+                           'logical_ip': db_ipv6['ip'],
+                           'external_ip': db_ipv6['ip'],
+                           'logical_port': db_port['id'],
+                           'external_ids': ext_ids,
+                           'external_mac': db_port['mac_address']}
+
+                txn.add(self._nb_idl.add_nat_rule_in_lrouter(
+                    gw_lrouter_name, **columns))
+            else:
+                # Skip if the NAT rule does not exist in OVN context
+                if not self._find_ipv6_nat_rule(
+                        gw_lrouter_name, db_ipv6['ip']):
+                    continue
+                txn.add(self._nb_idl.delete_nat_rule_in_lrouter(
+                    gw_lrouter_name, type='dnat_and_snat',
+                    logical_ip=db_ipv6['ip'],
+                    external_ip=db_ipv6['ip']))
+
+    def create_distributed_ipv6(self, port, txn):
+        """Create the IPv6 NAT rule for the DVR scenario
+
+        Use the ipv6 address attached to the subnet of the port to
+        create the IPv6 NAT rule.
+
+        :param port: Port object.
+        :param txn: The ovsdbapp transaction object.
+        """
+        if not ovn_conf.is_ovn_distributed_ipv6():
+            return
+        # Verify the device owner relationship
+        if not port.get('device_owner', '').startswith(
+                const.DEVICE_OWNER_COMPUTE_PREFIX):
+            return
+
+        for ip in port.get('fixed_ips', []):
+            if common_utils.get_ip_version(ip['ip_address']) == \
+                    const.IP_VERSION_4:
+                continue
+            # Get the Logical_Router attached to that IPv6 subnet address
+            lrp_port = self._nb_idl.get_logical_router_ports_by_subnet_ids(
+                ip['subnet_id'])
+            if not lrp_port:
+                continue
+            gw_lrouter_name = lrp_port.external_ids.get(
+                ovn_const.OVN_ROUTER_NAME_EXT_ID_KEY)
+            if not gw_lrouter_name:
+                continue
+            port_ipv6_address = ip['ip_address']
+            if self._find_ipv6_nat_rule(gw_lrouter_name, port_ipv6_address):
+                continue
+
+            # Set the NAT external_ids with the port information
+            ext_ids = {
+                ovn_const.OVN_PORT_EXT_ID_KEY: port['id'],
+                ovn_const.OVN_DEVID_EXT_ID_KEY: port['device_id'],
+                ovn_const.OVN_NETWORK_NAME_EXT_ID_KEY:
+                    utils.ovn_name(port['network_id']),
+                ovn_const.OVN_ROUTER_NAME_EXT_ID_KEY: gw_lrouter_name}
+            columns = {'type': 'dnat_and_snat',
+                       'logical_ip': port_ipv6_address,
+                       'external_ip': port_ipv6_address,
+                       'logical_port': port['id'],
+                       'external_ids': ext_ids,
+                       'external_mac': port['mac_address']}
+
+            txn.add(self._nb_idl.add_nat_rule_in_lrouter(gw_lrouter_name,
+                                                         **columns))
+
+    def delete_distributed_ipv6(self, router_name, ipv6_addr, txn):
+        """Delete the IPv6 NAT rule for the DVR scenario
+
+        :param router_name: OVN context router name.
+        :param ipv6_addr: The IPv6 address to apply the NAT rule.
+        :param txn: The ovsdbapp transaction object.
+        """
+
+        txn.add(self._nb_idl.delete_nat_rule_in_lrouter(
+            router_name, type='dnat_and_snat',
+            logical_ip=ipv6_addr,
+            external_ip=ipv6_addr))
+
+    def _delete_distributed_ipv6_by_port(self, port, txn):
+        """Delete the IPv6 NAT rule for DVR scenario by port
+
+        :param port: Port object.
+        :param txn: The ovsdbapp transaction object.
+        """
+        if not ovn_conf.is_ovn_distributed_ipv6():
+            return
+        # Verify the device owner relationship
+        if not port.get('device_owner', '').startswith(
+                const.DEVICE_OWNER_COMPUTE_PREFIX):
+            return
+
+        for ip in port.get('fixed_ips', []):
+            if common_utils.get_ip_version(ip['ip_address']) == \
+                    const.IP_VERSION_4:
+                continue
+            # Get the Logical_Router attached to that IPv6 subnet address
+            lrp_port = self._nb_idl.get_logical_router_ports_by_subnet_ids(
+                ip['subnet_id'])
+            if not lrp_port:
+                continue
+            gw_lrouter_name = lrp_port.external_ids.get(
+                ovn_const.OVN_ROUTER_NAME_EXT_ID_KEY)
+            if not gw_lrouter_name:
+                continue
+            port_ipv6_address = ip['ip_address']
+            if not self._find_ipv6_nat_rule(
+                    gw_lrouter_name, port_ipv6_address):
+                continue
+
+            self.delete_distributed_ipv6(gw_lrouter_name, port_ipv6_address,
+                                         txn)
