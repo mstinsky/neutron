@@ -126,6 +126,7 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
         self.sync_fip_qos_policies(ctx)
         self.sync_fip_dnat_rules()
         self.sync_fip_distributed_nat(ctx)
+        self.sync_distributed_ipv6(ctx)
 
         LOG.debug("OVN-Northbound DB sync process completed @ %s",
                   str(datetime.now()))
@@ -790,7 +791,10 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
                         db_fip['floating_ip_address']):
                     break
             else:
-                to_remove.append(ovn_fip)
+                # check if we are validating a fip NAT entry
+                if (ovn_fip['external_ids'].get(ovn_const.OVN_FIP_EXT_ID_KEY)
+                        is not None):
+                    to_remove.append(ovn_fip)
 
         return to_add, to_remove
 
@@ -1810,6 +1814,118 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
 
         LOG.debug('OVN-NB Sync distributed Floating IP NAT rules '
                   'completed @ %s', str(datetime.now()))
+
+    def _check_duplicated_ipv6_rule(self, db_ipv6, rules):
+        return any(rule['data'] == db_ipv6['data'] for rule in rules)
+
+    def _calculate_distributed_ipv6_differences(self, ovn_nats, router,
+                                                ctx):
+        router_ports = []
+        # Skip the neutron side check if ovn distributed flag is disabled
+        if ovn_conf.is_ovn_distributed_ipv6():
+            filters = {'device_id': [router['id']]}
+            router_ports = self.core_plugin.get_ports(ctx, filters=filters)
+        db_ipv6s = []
+        # Get the Neutron ports linked to each router network and filter by
+        # device owner compute with ipv6_address_mode on the subnet
+        for router_port in router_ports:
+            filters = {'network_id': [router_port['network_id']]}
+            db_ports = self.core_plugin.get_ports(ctx, filters=filters)
+            for port in db_ports:
+                if not port.get('device_owner', '').startswith(
+                        constants.DEVICE_OWNER_COMPUTE_PREFIX):
+                    continue
+                for ip in port.get('fixed_ips', []):
+                    subnet = self.core_plugin.get_subnet(ctx,
+                                                         ip['subnet_id'])
+                    if subnet and subnet['ipv6_address_mode'] is not None:
+                        # Get the Logical_Router attached to that IPv6 subnet
+                        # address
+                        rf = {'fixed_ips': {'subnet_id':
+                                            [subnet['id']]},
+                              'device_owner':
+                                  [constants.DEVICE_OWNER_ROUTER_INTF]}
+                        router_if = self.core_plugin.get_ports(ctx,
+                                                               filters=rf)
+                        if router_if:
+                            db_ipv6s.append(
+                                {'ip': ip['ip_address'],
+                                 'data': port})
+
+        to_add = []
+        to_remove = []
+        for db_ipv6 in db_ipv6s:
+            for ovn_nat in ovn_nats:
+                if (ovn_nat['logical_ip'] == db_ipv6['ip'] and
+                        ovn_nat['external_ip'] == db_ipv6['ip']):
+                    break
+            else:
+                # The router can have both IPv4 and IPv6 subnet linked to the
+                # same Network, make sure we don't insert it twice.
+                if not self._check_duplicated_ipv6_rule(db_ipv6, to_add):
+                    to_add.append(db_ipv6)
+
+        for ovn_nat in ovn_nats:
+            for db_ipv6 in db_ipv6s:
+                if (ovn_nat['logical_ip'] == db_ipv6['ip'] and
+                        ovn_nat['external_ip'] == db_ipv6['ip']):
+                    break
+            else:
+                ovn_ipv6_rule = {'ip': ovn_nat['external_ip'],
+                                 'data': utils.ovn_name(router['id'])}
+                to_remove.append(ovn_ipv6_rule)
+
+        return to_add, to_remove
+
+    def sync_distributed_ipv6(self, ctx):
+        """Sync distributed IPv6 nat rules."""
+        LOG.debug('OVN-NB Sync distributed IPv6 started @ %s',
+                  str(datetime.now()))
+        update_ipv6_list = []
+        # Get all router NAT rules to compare the differences
+        for router in self.l3_plugin.get_routers(ctx):
+            ovn_nat = []
+            try:
+                lrouter_nats = self.ovn_nb_api.get_lrouter_nat_rules(
+                    utils.ovn_name(router['id']), 'dnat_and_snat')
+            except RuntimeError:
+                continue
+            for lrouter_nat in lrouter_nats:
+                if lrouter_nat['external_ids'].get(
+                        ovn_const.OVN_FIP_EXT_ID_KEY) is None:
+                    ovn_nat.append(lrouter_nat)
+
+            add_nat_ipv6, del_nat_ipv6 = \
+                self._calculate_distributed_ipv6_differences(
+                    ovn_nat, router, ctx)
+            update_ipv6_list.append({'id': router['id'],
+                                     'add': add_nat_ipv6,
+                                     'del': del_nat_ipv6})
+
+        with self.ovn_nb_api.transaction(check_error=True) as txn:
+            for dvr_ipv6 in update_ipv6_list:
+                for nat in dvr_ipv6['del']:
+                    LOG.warning("Router %(id)s distributed IPv6 %(ipv6)s "
+                                "found in OVN but not in Neutron",
+                                {'id': dvr_ipv6['id'], 'ipv6': nat['ip']})
+                    if self.mode == n_lib_ovn_const.OVN_DB_SYNC_MODE_REPAIR:
+                        LOG.warning(
+                            "Delete distributed IPv6 %s from OVN NB DB",
+                            nat['ip'])
+                        self._ovn_client.delete_distributed_ipv6(
+                            nat['data'], nat['ip'], txn)
+                for nat in dvr_ipv6['add']:
+                    LOG.warning("Router %(id)s distributed IPv6 %(ipv6)s "
+                                "found in Neutron but not in OVN",
+                                {'id': dvr_ipv6['id'], 'ipv6': nat['ip']})
+                    if self.mode == n_lib_ovn_const.OVN_DB_SYNC_MODE_REPAIR:
+                        LOG.warning("Add distributed IPv6 %s to OVN NB DB",
+                                    nat['ip'])
+                        self._ovn_client.create_distributed_ipv6(
+                            nat['data'], txn)
+
+        LOG.debug('OVN-NB Sync distributed IPv6 completed @ %s',
+                  str(datetime.now()))
 
 
 class OvnSbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):

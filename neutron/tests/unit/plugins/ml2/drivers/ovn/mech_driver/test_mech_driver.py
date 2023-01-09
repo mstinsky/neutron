@@ -5846,3 +5846,198 @@ class TestOVNMechanismDriverMaintenanceThread(TestOVNMechanismDriverBase):
                                                      any_order=True)
 
         mock_thread().start.assert_called()
+
+
+class TestOVNMechanismDriverDVRIPv6(OVNMechanismDriverTestCase):
+
+    def setUp(self):
+        super().setUp()
+
+        self.fake_sub = fakes.FakeSubnet.create_one_subnet_ipv6().info()
+        mock.patch.object(self.mech_driver._plugin,
+                          'get_subnet', return_value=self.fake_sub).start()
+
+        net_attrs = {'subnets': [self.fake_sub], 'tenant_id': 'test_ipv6',
+                     'name': 'test_dvr_ipv6_network'}
+        self.fake_net = (
+            fakes.FakeNetwork.create_one_network(attrs=net_attrs).info())
+        mock.patch.object(self.mech_driver._plugin,
+                          'get_network', return_value=self.fake_net).start()
+
+        self.nb_ovn_idl = self.mech_driver.nb_ovn
+        self.nb_ovn_idl.get_all_logical_routers_with_rports = mock.Mock()
+        self.nb_ovn_idl.get_logical_router_ports_by_subnet_ids = mock.Mock()
+        self.ovn_client = ovn_client.OVNClient(self.mech_driver.nb_ovn,
+                                               self.mech_driver.sb_ovn)
+        self.ovn_client.create_port = mock.Mock()
+
+        port_attrs = {'id': 'dvr-ipv6',
+                      'device_owner': 'compute:nova',
+                      'mac_address': '22:22:22:22:22:22',
+                      'fixed_ips':
+                          [{"ip_address": "2001:db8:1234::22",
+                            'subnet_id': self.fake_sub['id']}]}
+
+        self._fake_port = fakes.FakePort.create_one_port(
+            attrs=port_attrs).info()
+        fake_port_context = fakes.FakePortContext(self._fake_port, 'host', [])
+
+        self.ovn_client.create_port(fake_port_context, self._fake_port)
+
+        self._external_ids = {
+                           'neutron:device_id=': self._fake_port['device_id'],
+                           'neutron:network_name=': 'test_dvr_ipv6_network',
+                           'neutron:port_id=': self._fake_port['id'],
+                           'neutron:router_name=': 'r1'}
+
+        self._fake_txn = mock.MagicMock()
+
+    def _test_create_port_subnet_ipv6_dvr(self, exp_dnat_snat):
+
+        self.ovn_client.create_distributed_ipv6(self._fake_port,
+                                                self._fake_txn)
+
+        lrouters_with_rports = {'name': 'r1',
+                                'ports': {'p1r1': self._fake_port['id']},
+                                'dnat_and_snats': [{
+                                    'logical_ip': '2001:db8:1234::22',
+                                    'external_ip': '2001:db8:1234::22',
+                                    'type': 'dnat_and_snat',
+                                    'external_ids': self._external_ids}]}
+
+        self.nb_ovn_idl.get_all_logical_routers_with_rports.return_value = (
+            lrouters_with_rports)
+        mapping = self.nb_ovn_idl.get_all_logical_routers_with_rports()
+
+        if ovn_conf.is_ovn_distributed_ipv6():
+            self.assertEqual(exp_dnat_snat, mapping)
+        else:
+            self.assertNotEqual(exp_dnat_snat, mapping)
+
+    def _test_delete_port_subnet_ipv6_dvr(self, exp_dnat_snat):
+
+        self.ovn_client._delete_distributed_ipv6_by_port(self._fake_port,
+                                                         self._fake_txn)
+
+        lrouters_with_rports = {'name': 'r1',
+                                'ports': {'p1r1': self._fake_port['id']},
+                                'dnat_and_snats': {}}
+
+        self.nb_ovn_idl.get_all_logical_routers_with_rports.return_value = (
+            lrouters_with_rports)
+        mapping = self.nb_ovn_idl.get_all_logical_routers_with_rports()
+
+        self.assertEqual(exp_dnat_snat, mapping)
+
+    def test_port_subnet_ipv6_dvr_enabled(self):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
+                                       group='ovn')
+        exp_dnat_snat = {'name': 'r1',
+                         'ports': {'p1r1': self._fake_port['id']},
+                         'dnat_and_snats': [{
+                             'external_ip': '2001:db8:1234::22',
+                             'logical_ip': '2001:db8:1234::22',
+                             'type': 'dnat_and_snat',
+                             'external_ids': self._external_ids}]}
+        self._test_create_port_subnet_ipv6_dvr(exp_dnat_snat)
+
+        exp_dnat_snat_del = {'name': 'r1',
+                             'ports': {'p1r1': self._fake_port['id']},
+                             'dnat_and_snats': {}}
+        self._test_delete_port_subnet_ipv6_dvr(exp_dnat_snat_del)
+
+    def test_port_subnet_ipv6_dvr_disabled(self):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'False',
+                                       group='ovn')
+        exp_dnat_snat = {'name': 'r1',
+                         'ports': {'p1r1': self._fake_port['id']},
+                         'dnat_and_snats': {}}
+        self._test_create_port_subnet_ipv6_dvr(exp_dnat_snat)
+
+        self._test_delete_port_subnet_ipv6_dvr(exp_dnat_snat)
+
+    def test_delete_port_subnet_ipv6_dvr(self):
+
+        exp_dnat_snat = {'name': 'r1',
+                         'ports': {'p1r1': self._fake_port['id']},
+                         'dnat_and_snats': {}}
+
+        self.ovn_client.delete_distributed_ipv6('r1', '2001:db8:1234::22',
+                                                self._fake_txn)
+
+        lrouters_with_rports = {'name': 'r1',
+                                'ports': {'p1r1': self._fake_port['id']},
+                                'dnat_and_snats': {}}
+
+        self.nb_ovn_idl.get_all_logical_routers_with_rports.return_value = (
+            lrouters_with_rports)
+        mapping = self.nb_ovn_idl.get_all_logical_routers_with_rports()
+
+        self.assertEqual(exp_dnat_snat, mapping)
+
+    def _test_update_router_port_ipv6_dvr_add(self, exp_dnat_snat):
+
+        self.ovn_client._update_dvr_nat_ipv6(
+            self.context, 'r1', self._fake_port['id'], True, self._fake_txn)
+
+        lrouters_with_rports = {'name': 'r1',
+                                'ports': {'p1r1': self._fake_port['id']},
+                                'dnat_and_snats': [{
+                                    'logical_ip': '2001:db8:1234::22',
+                                    'external_ip': '2001:db8:1234::22',
+                                    'type': 'dnat_and_snat',
+                                    'external_ids': self._external_ids}]}
+
+        self.nb_ovn_idl.get_all_logical_routers_with_rports.return_value = (
+            lrouters_with_rports)
+        mapping = self.nb_ovn_idl.get_all_logical_routers_with_rports()
+
+        if ovn_conf.is_ovn_distributed_ipv6():
+            self.assertEqual(exp_dnat_snat, mapping)
+        else:
+            self.assertNotEqual(exp_dnat_snat, mapping)
+
+    def _test_update_router_port_ipv6_dvr_del(self, exp_dnat_snat):
+
+        self.ovn_client._update_dvr_nat_ipv6(
+            self.context, 'r1', self._fake_port['id'], False, self._fake_txn)
+
+        lrouters_with_rports = {'name': 'r1',
+                                'ports': {'p1r1': self._fake_port['id']},
+                                'dnat_and_snats': {}}
+
+        self.nb_ovn_idl.get_all_logical_routers_with_rports.return_value = (
+            lrouters_with_rports)
+        mapping = self.nb_ovn_idl.get_all_logical_routers_with_rports()
+
+        self.assertEqual(exp_dnat_snat, mapping)
+
+    def test_update_router_port_ipv6_dvr_enabled(self):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
+                                       group='ovn')
+        exp_dnat_snat = {'name': 'r1',
+                         'ports': {'p1r1': self._fake_port['id']},
+                         'dnat_and_snats': [{
+                             'external_ip': '2001:db8:1234::22',
+                             'logical_ip': '2001:db8:1234::22',
+                             'type': 'dnat_and_snat',
+                             'external_ids': self._external_ids}]}
+
+        self._test_update_router_port_ipv6_dvr_add(exp_dnat_snat)
+
+        exp_dnat_snat = {'name': 'r1',
+                         'ports': {'p1r1': self._fake_port['id']},
+                         'dnat_and_snats': {}}
+
+        self._test_update_router_port_ipv6_dvr_del(exp_dnat_snat)
+
+    def test_update_router_port_ipv6_dvr_disabled(self):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'False',
+                                       group='ovn')
+        exp_dnat_snat = {'name': 'r1',
+                         'ports': {'p1r1': self._fake_port['id']},
+                         'dnat_and_snats': {}}
+
+        self._test_update_router_port_ipv6_dvr_add(exp_dnat_snat)
+
+        self._test_update_router_port_ipv6_dvr_del(exp_dnat_snat)

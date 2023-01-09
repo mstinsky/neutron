@@ -585,13 +585,17 @@ class TestOvnNbSync(base.TestOVNFunctionalBase):
         self.create_lrouter_nats.append(('neutron-' + r1['id'],
                                          {'external_ip': '100.0.0.200',
                                           'logical_ip': '200.0.0.200',
-                                          'type': 'dnat_and_snat'}))
+                                          'type': 'dnat_and_snat',
+                                          'external_ids': {"neutron:fip_id":
+                                                           "fip1"}}))
         self.create_lrouter_nats.append(('neutron-' + r1['id'],
                                          {'external_ip': '100.0.0.201',
                                           'logical_ip': '200.0.0.201',
                                           'type': 'dnat_and_snat',
                                           'external_mac': '01:02:03:04:05:06',
-                                          'logical_port': 'vm1'
+                                          'logical_port': 'vm1',
+                                          'external_ids': {"neutron:fip_id":
+                                                           "fip2"}
                                           }))
         self.delete_lrouter_nats.append(('neutron-' + r1['id'],
                                          {'external_ip':

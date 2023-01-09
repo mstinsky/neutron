@@ -753,7 +753,8 @@ class OvsdbNbOvnIdl(nb_impl_idl.OvnNbApiIdlImpl, Backend):
                                                  logical_ip, external_ip,
                                                  if_exists)
 
-    def get_lrouter_nat_rules(self, lrouter_name):
+    def get_lrouter_nat_rules(self, lrouter_name, filter_type=None,
+                              filter_external_ip=None, filter_logical_ip=None):
         try:
             lrouter = idlutils.row_by_value(self.idl, 'Logical_Router',
                                             'name', lrouter_name)
@@ -764,6 +765,14 @@ class OvsdbNbOvnIdl(nb_impl_idl.OvnNbApiIdlImpl, Backend):
         nat_rules = []
         for nat_rule in getattr(lrouter, 'nat', []):
             ext_ids = dict(getattr(nat_rule, 'external_ids', {}))
+            if filter_type and nat_rule.type != filter_type:
+                continue
+            if filter_external_ip and (
+                    nat_rule.external_ip != filter_external_ip):
+                continue
+            if filter_logical_ip and (
+                    nat_rule.logical_ip != filter_logical_ip):
+                continue
             nat_rules.append({'external_ip': nat_rule.external_ip,
                               'logical_ip': nat_rule.logical_ip,
                               'type': nat_rule.type,
@@ -982,6 +991,18 @@ class OvsdbNbOvnIdl(nb_impl_idl.OvnNbApiIdlImpl, Backend):
         return cmd.HAChassisGroupWithHCAddCommand(
             self, name, chassis_priority, may_exist=may_exist,
             **columns)
+
+    def get_logical_router_ports_by_subnet_ids(self, subnet_ids):
+        """Returns OVN logical router port filtered by subnet_ids.
+
+        This method will return the logical router port entry in OVN that map
+        to a subnet id in external_ids register.
+        """
+        for lrp in self._tables['Logical_Router_Port'].rows.values():
+            lrp_subnet_ids = lrp.external_ids.get(
+                ovn_const.OVN_SUBNET_EXT_IDS_KEY, '')
+            if subnet_ids in lrp_subnet_ids:
+                return lrp
 
 
 class OvsdbSbOvnIdl(sb_impl_idl.OvnSbApiIdlImpl, Backend):

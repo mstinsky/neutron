@@ -137,6 +137,14 @@ ovn_opts = [
                        'saves the path to the external network. This requires '
                        'the user to configure the physical network map '
                        '(i.e. ovn-bridge-mappings) on each compute node.')),
+    cfg.BoolOpt('enable_distributed_ipv6',
+                default=False,
+                help=_('Enable distributed IPv6 support.\n'
+                       'If True, the NAT action for GUA IPv6s will be done '
+                       'locally and not in the centralized gateway. This '
+                       'saves the path to the external network. This requires '
+                       'the user to configure the physical network map '
+                       '(i.e. ovn-bridge-mappings) on each compute node.')),
     cfg.StrOpt("vhost_sock_dir",
                default="/var/run/openvswitch",
                help=_("The directory in which vhost virtio sockets "
@@ -424,6 +432,10 @@ def is_ovn_distributed_floating_ip():
 
 def get_ovn_lm_activation_strategy():
     return cfg.CONF.ovn.live_migration_activation_strategy
+
+
+def is_ovn_distributed_ipv6():
+    return cfg.CONF.ovn.enable_distributed_ipv6
 
 
 def get_ovn_vhost_sock_dir():

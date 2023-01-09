@@ -734,6 +734,42 @@ class FakeSubnet:
         return FakeResource(info=copy.deepcopy(subnet_attrs),
                             loaded=True)
 
+    @staticmethod
+    def create_one_subnet_ipv6(attrs=None):
+        """Create a fake subnet.
+
+        :param Dictionary attrs:
+            A dictionary with all attributes
+        :return:
+            A FakeResource object faking the subnet IPv6
+        """
+        attrs = attrs or {}
+
+        # Set default attributes.
+        fake_uuid = uuidutils.generate_uuid()
+        subnet_attrs = {
+            'id': 'subnet-id-' + fake_uuid,
+            'name': 'subnet-name-' + fake_uuid,
+            'network_id': 'network-id-' + fake_uuid,
+            'cidr': '2001:db8:1234::/64',
+            'tenant_id': 'project-id-' + fake_uuid,
+            'enable_dhcp': True,
+            'dns_nameservers': [],
+            'allocation_pools': [],
+            'host_routes': [],
+            'ip_version': 6,
+            'gateway_ip': '2001:db8:1234::1',
+            'ipv6_address_mode': 'dhcpv6-stateful',
+            'ipv6_ra_mode': 'dhcpv6-stateful',
+            'subnetpool_id': None,
+        }
+
+        # Overwrite default attributes.
+        subnet_attrs.update(attrs)
+
+        return FakeResource(info=copy.deepcopy(subnet_attrs),
+                            loaded=True)
+
 
 class FakeFloatingIp:
     """Fake one or more floating ips."""

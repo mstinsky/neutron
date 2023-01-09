@@ -71,6 +71,10 @@ flag is configured to True in the neutron server configuration, being
 a deployment wide setting. In contrast to ML2/ovs which was able to specify
 this setting per router (only admin).
 
+DVR will be used for IPv6 GUAs if the ovn / enable_distributed_ipv6
+flag is configured to True in the neutron server configuration, being
+a deployment wide setting.
+
 Although ovn driver does not expose the "distributed" flag of routers
 throught the API.
 

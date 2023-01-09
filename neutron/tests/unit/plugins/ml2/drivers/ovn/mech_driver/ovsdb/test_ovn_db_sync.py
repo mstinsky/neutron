@@ -17,6 +17,7 @@ from unittest import mock
 
 from neutron_lib.api.definitions import portbindings
 from neutron_lib import constants as const
+from neutron_lib import context
 from neutron_lib import exceptions as n_exc
 from neutron_lib.ovn import constants as n_lib_ovn_const
 from neutron_lib.services.logapi import constants as log_const
@@ -24,6 +25,7 @@ from oslo_utils import uuidutils
 
 from neutron.common.ovn import acl
 from neutron.common.ovn import constants as ovn_const
+from neutron.conf.plugins.ml2.drivers.ovn import ovn_conf
 from neutron.plugins.ml2.drivers.ovn.mech_driver.ovsdb import impl_idl_ovn
 from neutron.plugins.ml2.drivers.ovn.mech_driver.ovsdb import ovn_client
 from neutron.plugins.ml2.drivers.ovn.mech_driver.ovsdb import ovn_db_sync
@@ -401,15 +403,21 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
                                       'dnat_and_snats':
                                       [{'logical_ip': '172.16.0.10',
                                         'external_ip': '90.0.0.10',
-                                        'type': 'dnat_and_snat'},
+                                        'type': 'dnat_and_snat',
+                                        'external_ids': {"neutron:fip_id":
+                                                         "fip1"}},
                                        {'logical_ip': '172.16.1.11',
                                         'external_ip': '90.0.0.11',
-                                        'type': 'dnat_and_snat'},
+                                        'type': 'dnat_and_snat',
+                                        'external_ids': {"neutron:fip_id":
+                                                         "fip5"}},
                                        {'logical_ip': '192.168.2.11',
                                         'external_ip': '100.0.0.11',
                                         'type': 'dnat_and_snat',
                                         'external_mac': '01:02:03:04:05:06',
-                                        'logical_port': 'vm1'}]}]
+                                        'logical_port': 'vm1',
+                                        'external_ids': {"neutron:fip_id":
+                                                         "fip4"}}]}]
 
         self.lswitches_with_ports = [{'name': 'neutron-n1',
                                       'ports': ['p1n1', 'p3n1'],
@@ -994,12 +1002,14 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
                                  'fixed_ip_address': '192.168.2.11'}]
         del_floating_ip_list = [{'logical_ip': '172.16.1.11',
                                  'external_ip': '90.0.0.11',
-                                 'type': 'dnat_and_snat'},
+                                 'type': 'dnat_and_snat',
+                                 'external_ids': {"neutron:fip_id": "fip5"}},
                                 {'logical_ip': '192.168.2.11',
                                  'external_ip': '100.0.0.11',
                                  'type': 'dnat_and_snat',
                                  'external_mac': '01:02:03:04:05:06',
-                                 'logical_port': 'vm1'}]
+                                 'logical_port': 'vm1',
+                                 'external_ids': {"neutron:fip_id": "fip4"}}]
 
         del_router_list = [{'router': 'neutron-r3'}]
         del_router_port_list = [{'id': 'lrp-p3r1', 'router': 'neutron-r1'}]
@@ -1366,6 +1376,131 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
                                                        db_routes,
                                                        expected_added,
                                                        expected_deleted)
+
+    def _test_ovn_nb_sync_calculate_ipv6_dvr_helper(self,
+                                                    ovn_nat,
+                                                    router,
+                                                    expected_added,
+                                                    expected_deleted,
+                                                    fake_ports):
+        ovn_nb_synchronizer = ovn_db_sync.OvnNbSynchronizer(
+            self.plugin, self.mech_driver,
+            n_lib_ovn_const.OVN_DB_SYNC_MODE_REPAIR)
+        ctx = context.get_admin_context()
+
+        db_port = [{'id': 'p1r1',
+                    'fixed_ips': [
+                        {'subnet_id': 'subnet1',
+                         'ip_address': '2001:db8:1234::22'}],
+                    'network_id': 'network-r1',
+                    'device_owner': 'compute:nova',
+                    'device_id': 'neutron-r1',
+                    'mac_address': '01:01:01:01:01:01'}]
+
+        ovn_nb_synchronizer.core_plugin.get_ports = mock.Mock()
+        # Do not return any ports in deletion case because the calc method
+        # will call the get_ports with 2 different kinf of filters, and this
+        # breaks the return value of the get_ports mock.
+        if fake_ports:
+            ovn_nb_synchronizer.core_plugin.get_ports.return_value = db_port
+        else:
+            ovn_nb_synchronizer.core_plugin.get_ports.return_value = []
+
+        db_subnet = {'id': 'subnet1',
+                     'ip_version': 6,
+                     'cidr': '2001:db8:1234::0/64',
+                     'enable_dhcp': True,
+                     'ipv6_address_mode': 'dhcpv6-stateful',
+                     'dns_nameservers': [],
+                     'host_routes': []}
+
+        ovn_nb_synchronizer.core_plugin.get_subnet = mock.Mock()
+        ovn_nb_synchronizer.core_plugin.get_subnet.return_value = db_subnet
+
+        add_routes, del_routes = ovn_nb_synchronizer. \
+            _calculate_distributed_ipv6_differences(ovn_nat,
+                                                    router, ctx)
+        self.assertEqual(add_routes, expected_added)
+        self.assertEqual(del_routes, expected_deleted)
+
+    def test_ovn_nb_sync_calculate_ipv6_dvr_add_nat_rules(self):
+
+        # add 1 nat rule to ovn
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
+                                       group='ovn')
+        ovn_nat = []
+        db_nat = {'name': 'neutron-r1',
+                  'id': 'r1',
+                  'ports':
+                      {'p1r1':
+                          {'fixed_ips':
+                              [{'subnet_id': 'subnet1',
+                                'ip_address': '2001:db8:1234::22'}],
+                           'id': 'p1r1',
+                           'device_id': 'neutron-r1',
+                           'mac_address': '01:01:01:01:01:01'}},
+                  'static_routes': [],
+                  'snats': [],
+                  'dnat_and_snats': [{
+                      'external_ip': '2001:db8:1234::22',
+                      'logical_ip': '2001:db8:1234::22',
+                      'type': 'dnat_and_snat',
+                      'external_ids': {}}]}
+
+        fake_lrouter = fakes.FakeOvsdbRow.create_one_ovsdb_row(
+            attrs=db_nat)
+
+        expected_added = [{'ip': '2001:db8:1234::22',
+                           'data': {'id': 'p1r1',
+                                    'fixed_ips': [
+                                        {'subnet_id': 'subnet1',
+                                        'ip_address': '2001:db8:1234::22'}],
+                                    'network_id': 'network-r1',
+                                    'device_owner': 'compute:nova',
+                                    'device_id': 'neutron-r1',
+                                    'mac_address': '01:01:01:01:01:01'}}]
+        expected_deleted = []
+        self._test_ovn_nb_sync_calculate_ipv6_dvr_helper(ovn_nat,
+                                                         fake_lrouter,
+                                                         expected_added,
+                                                         expected_deleted,
+                                                         True)
+
+    def test_ovn_nb_sync_calculate_ipv6_dvr_del_nat_rules(self):
+
+        # del 1 nat ovn rules
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
+                                       group='ovn')
+        ovn_nat = [{'external_ip': '2001:db8:1234::22',
+                   'logical_ip': '2001:db8:1234::22',
+                   'type': 'dnat_and_snat',
+                   'external_ids': {}}]
+
+        db_nat = {'name': 'neutron-r1',
+                  'id': 'r1',
+                  'ports':
+                      {'p1r1':
+                          {'fixed_ips': [
+                              {'subnet_id': 'subnet1',
+                               'ip_address': '2001:db8:1234::22'}],
+                           'id': 'p1r1',
+                           'device_id': 'neutron-r1',
+                           'mac_address': '01:01:01:01:01:01'}},
+                  'static_routes': [],
+                  'snats': [],
+                  'dnat_and_snats': {}}
+
+        fake_lrouter = fakes.FakeOvsdbRow.create_one_ovsdb_row(
+            attrs=db_nat)
+
+        expected_added = []
+        expected_deleted = [{'ip': '2001:db8:1234::22',
+                            'data': 'neutron-r1'}]
+        self._test_ovn_nb_sync_calculate_ipv6_dvr_helper(ovn_nat,
+                                                         fake_lrouter,
+                                                         expected_added,
+                                                         expected_deleted,
+                                                         False)
 
 
 class TestIsRouterPortChanged(test_mech_driver.OVNMechanismDriverTestCase):
