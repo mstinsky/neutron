@@ -5257,7 +5257,8 @@ class TestOVNMechanismDriverDVRIPv6(OVNMechanismDriverTestCase):
 
     def _test_create_port_subnet_ipv6_dvr(self, exp_dnat_snat):
 
-        self.ovn_client.create_distributed_ipv6(self._fake_port,
+        self.ovn_client.create_distributed_ipv6(self.context,
+                                                self._fake_port,
                                                 self._fake_txn)
 
         lrouters_with_rports = {'name': 'r1',
@@ -5404,3 +5405,96 @@ class TestOVNMechanismDriverDVRIPv6(OVNMechanismDriverTestCase):
         self._test_update_router_port_ipv6_dvr_add(exp_dnat_snat)
 
         self._test_update_router_port_ipv6_dvr_del(exp_dnat_snat)
+
+    def test_port_subnet_ipv6_dvr_mode_all_exposes_ula(self):
+        """With mode 'all', ULA IPv6 is exposed for DVR."""
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode', 'all',
+                                       group='ovn')
+        port_ula = fakes.FakePort.create_one_port(attrs={
+            'id': 'dvr-ipv6-ula',
+            'device_owner': 'compute:nova',
+            'mac_address': '22:22:22:22:22:22',
+            'fixed_ips': [{"ip_address": "fd00::1",
+                          'subnet_id': self.fake_sub['id']}]
+        }).info()
+        self.mech_driver._plugin.get_subnet.return_value = self.fake_sub
+        nb_idl = self.ovn_client._nb_idl
+        nb_idl.get_logical_router_ports_by_subnet_ids.return_value = mock.Mock(
+            external_ids={'neutron:router_name': 'r1'})
+        nb_idl.get_lrouter_nat_rules.return_value = []
+        self.ovn_client.create_distributed_ipv6(self.context,
+                                                port_ula,
+                                                self._fake_txn)
+        self._fake_txn.add.assert_called()
+
+    def test_port_subnet_ipv6_dvr_mode_gua_filters_ula(self):
+        """With mode 'gua', ULA IPv6 is not exposed for DVR."""
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode', 'gua',
+                                       group='ovn')
+        port_ula = fakes.FakePort.create_one_port(attrs={
+            'id': 'dvr-ipv6-ula',
+            'device_owner': 'compute:nova',
+            'mac_address': '22:22:22:22:22:22',
+            'fixed_ips': [{"ip_address": "fd00::1",
+                          'subnet_id': self.fake_sub['id']}]
+        }).info()
+        self.mech_driver._plugin.get_subnet.return_value = self.fake_sub
+        nb_idl = self.ovn_client._nb_idl
+        nb_idl.get_logical_router_ports_by_subnet_ids.return_value = mock.Mock(
+            external_ids={'neutron:router_name': 'r1'})
+        self.ovn_client.create_distributed_ipv6(self.context,
+                                                port_ula,
+                                                self._fake_txn)
+        # add_nat_rule_in_lrouter should not be called (ULA filtered)
+        nat_calls = [c for c in self._fake_txn.add.call_args_list
+                     if 'add_nat_rule' in str(c)]
+        self.assertEqual([], nat_calls)
+
+    def test_port_subnet_ipv6_dvr_mode_address_scope_filters_unknown_scope(
+            self):
+        """With mode 'address_scope', only addresses in configured scopes."""
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode',
+                                       'address_scope', group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_address_scope_ids',
+                                       ['scope-1'], group='ovn')
+        self.mech_driver._plugin.get_subnet.return_value = self.fake_sub
+        with mock.patch.object(
+                self.mech_driver._plugin, 'get_subnetpool',
+                return_value={'address_scope_id': 'other-scope'}):
+            nb_idl = self.ovn_client._nb_idl
+            nb_idl.get_logical_router_ports_by_subnet_ids.return_value = (
+                mock.Mock(external_ids={'neutron:router_name': 'r1'}))
+            self.ovn_client.create_distributed_ipv6(self.context,
+                                                    self._fake_port,
+                                                    self._fake_txn)
+        nat_calls = [c for c in self._fake_txn.add.call_args_list
+                     if 'add_nat_rule' in str(c)]
+        self.assertEqual([], nat_calls)
+
+    def test_port_subnet_ipv6_dvr_mode_address_scope_exposes_matching_scope(
+            self):
+        """With mode 'address_scope', addresses in configured scope exposed."""
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode',
+                                       'address_scope', group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_address_scope_ids',
+                                       ['scope-1'], group='ovn')
+        self.mech_driver._plugin.get_subnet.return_value = dict(
+            self.fake_sub, subnetpool_id='pool-id')
+        with mock.patch.object(self.mech_driver._plugin, 'get_subnetpool',
+                               return_value={'address_scope_id': 'scope-1'}):
+            nb_idl = self.ovn_client._nb_idl
+            nb_idl.get_logical_router_ports_by_subnet_ids.return_value = (
+                mock.Mock(external_ids={'neutron:router_name': 'r1'}))
+            nb_idl.get_lrouter_nat_rules.return_value = []
+            self.ovn_client.create_distributed_ipv6(self.context,
+                                                    self._fake_port,
+                                                    self._fake_txn)
+        self._fake_txn.add.assert_called()

@@ -659,7 +659,7 @@ class OVNClient:
 
             self._qos_driver.create_port(context, txn, port, port_cmd)
 
-            self.create_distributed_ipv6(port, txn)
+            self.create_distributed_ipv6(context, port, txn)
 
         db_rev.bump_revision(context, port, ovn_const.TYPE_PORTS)
 
@@ -827,7 +827,7 @@ class OVNClient:
                 # We need to remove the old entries
                 self.add_txns_to_remove_port_dns_records(txn, port_object)
 
-            self.create_distributed_ipv6(port, txn)
+            self.create_distributed_ipv6(context, port, txn)
 
         if check_rev_cmd.result == ovn_const.TXN_COMMITTED:
             db_rev.bump_revision(context, port, ovn_const.TYPE_PORTS)
@@ -3159,6 +3159,21 @@ class OVNClient:
             lrouter_name, 'dnat_and_snat', ipv6_addr, ipv6_addr)
         return next(iter(lrouter_nats), None)
 
+    def _get_subnet_address_scope_id(self, context, subnet):
+        """Return the address_scope_id for the subnet's pool, or None.
+
+        Callers may pass a normal context; the function elevates internally
+        when reading the subnet pool.
+        """
+        if not subnet.get('subnetpool_id'):
+            return None
+        try:
+            pool = self._plugin.get_subnetpool(context.elevated(),
+                                              subnet['subnetpool_id'])
+            return pool.get('address_scope_id')
+        except n_exc.SubnetPoolNotFound:
+            return None
+
     def _update_dvr_nat_ipv6(self, context, router_id, port_id, create_rule,
                              txn):
         """Update the VM IPv6 NAT rule attached to the router port
@@ -3195,6 +3210,11 @@ class OVNClient:
                     subnet = self._plugin.get_subnet(admin_context,
                                                      ip['subnet_id'])
                     if subnet and subnet['ipv6_address_mode'] is not None:
+                        if not utils.should_expose_ipv6_for_dvr(
+                                ip['ip_address'],
+                                self._get_subnet_address_scope_id(
+                                    admin_context, subnet)):
+                            continue
                         # The router can have both IPv4 and IPv6 subnet linked
                         # to the same 'VM' port, make sure we don't insert it
                         # twice.
@@ -3237,12 +3257,13 @@ class OVNClient:
                     logical_ip=db_ipv6['ip'],
                     external_ip=db_ipv6['ip']))
 
-    def create_distributed_ipv6(self, port, txn):
+    def create_distributed_ipv6(self, context, port, txn):
         """Create the IPv6 NAT rule for the DVR scenario
 
         Use the ipv6 address attached to the subnet of the port to
         create the IPv6 NAT rule.
 
+        :param context: Neutron request context.
         :param port: Port object.
         :param txn: The ovsdbapp transaction object.
         """
@@ -3256,6 +3277,11 @@ class OVNClient:
         for ip in port.get('fixed_ips', []):
             if common_utils.get_ip_version(ip['ip_address']) == \
                     const.IP_VERSION_4:
+                continue
+            subnet = self._plugin.get_subnet(context, ip['subnet_id'])
+            if not utils.should_expose_ipv6_for_dvr(
+                    ip['ip_address'],
+                    self._get_subnet_address_scope_id(context, subnet)):
                 continue
             # Get the Logical_Router attached to that IPv6 subnet address
             lrp_port = self._nb_idl.get_logical_router_ports_by_subnet_ids(

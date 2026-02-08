@@ -1442,6 +1442,41 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
                                                          expected_deleted,
                                                          False)
 
+    def test_ovn_nb_sync_calculate_ipv6_dvr_mode_gua_filters_ula(self):
+        """With mode 'gua', ULA IPv6 is not added to db_ipv6s."""
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode', 'gua',
+                                       group='ovn')
+        ovn_nat = []
+        db_port = [{'id': 'p1r1',
+                    'fixed_ips': [
+                        {'subnet_id': 'subnet1', 'ip_address': 'fd00::1'}],
+                    'network_id': 'network-r1',
+                    'device_owner': 'compute:nova',
+                    'device_id': 'neutron-r1',
+                    'mac_address': '01:01:01:01:01:01'}]
+        db_subnet = {'id': 'subnet1',
+                     'ip_version': 6,
+                     'cidr': 'fd00::/64',
+                     'enable_dhcp': True,
+                     'ipv6_address_mode': 'dhcpv6-stateful',
+                     'dns_nameservers': [],
+                     'host_routes': []}
+        router = {'id': 'r1'}
+        ovn_nb_synchronizer = ovn_db_sync.OvnNbSynchronizer(
+            self.plugin, self.mech_driver, ovn_const.OVN_DB_SYNC_MODE_REPAIR)
+        ctx = context.get_admin_context()
+        ovn_nb_synchronizer.core_plugin.get_ports = mock.Mock(
+            return_value=db_port)
+        ovn_nb_synchronizer.core_plugin.get_subnet = mock.Mock(
+            return_value=db_subnet)
+        add_routes, del_routes = (
+            ovn_nb_synchronizer._calculate_distributed_ipv6_differences(
+                ovn_nat, router, ctx))
+        self.assertEqual([], add_routes)
+        self.assertEqual([], del_routes)
+
 
 class TestIsRouterPortChanged(test_mech_driver.OVNMechanismDriverTestCase):
 

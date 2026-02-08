@@ -143,6 +143,30 @@ ovn_opts = [
                        'saves the path to the external network. This requires '
                        'the user to configure the physical network map '
                        '(i.e. ovn-bridge-mappings) on each compute node.')),
+    cfg.StrOpt('ipv6_dvr_exposure_mode',
+               default='gua',
+               choices=[('all', _('Expose any IPv6 address when distributed '
+                                 'IPv6 is enabled.')),
+                       ('gua', _('Expose only IPv6 Globally Unique Addresses '
+                                 '(GUA) when distributed IPv6 is enabled. '
+                                 'Uses ipaddress.is_global.')),
+                       ('address_scope', _('Expose only IPv6 addresses from '
+                                          'networks whose subnet is in one of '
+                                          'the address scopes listed in '
+                                          'ipv6_dvr_address_scope_ids.'))],
+               help=_('Mode controlling which IPv6 addresses are exposed for '
+                     'distributed IPv6 (DVR). Only applies when '
+                     'enable_distributed_ipv6 is True. "all": any IPv6 '
+                     'address; "gua": only globally routable addresses '
+                     '(ipaddress.is_global); "address_scope": only addresses '
+                     'from subnets in the configured address scopes.')),
+    cfg.ListOpt('ipv6_dvr_address_scope_ids',
+                default=[],
+                help=_('List of address scope IDs. When '
+                      'ipv6_dvr_exposure_mode is "address_scope", only '
+                      'IPv6 addresses from subnets whose subnet pool is in '
+                      'one of these scopes are exposed for distributed IPv6. '
+                      'Ignored for other modes.')),
     cfg.StrOpt("vhost_sock_dir",
                default="/var/run/openvswitch",
                help=_("The directory in which vhost virtio sockets "
@@ -376,6 +400,14 @@ def get_ovn_lm_activation_strategy():
 
 def is_ovn_distributed_ipv6():
     return cfg.CONF.ovn.enable_distributed_ipv6
+
+
+def get_ovn_ipv6_dvr_exposure_mode():
+    return cfg.CONF.ovn.ipv6_dvr_exposure_mode
+
+
+def get_ovn_ipv6_dvr_address_scope_ids():
+    return cfg.CONF.ovn.ipv6_dvr_address_scope_ids
 
 
 def get_ovn_vhost_sock_dir():

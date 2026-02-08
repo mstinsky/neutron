@@ -1437,6 +1437,11 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
                     subnet = self.core_plugin.get_subnet(ctx,
                                                          ip['subnet_id'])
                     if subnet and subnet['ipv6_address_mode'] is not None:
+                        if not utils.should_expose_ipv6_for_dvr(
+                                ip['ip_address'],
+                                self._ovn_client._get_subnet_address_scope_id(
+                                    ctx, subnet)):
+                            continue
                         # Get the Logical_Router attached to that IPv6 subnet
                         # address
                         rf = {'fixed_ips': {'subnet_id':
@@ -1520,7 +1525,7 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
                         LOG.warning("Add distributed IPv6 %s to OVN NB DB",
                                     nat['ip'])
                         self._ovn_client.create_distributed_ipv6(
-                            nat['data'], txn)
+                            ctx, nat['data'], txn)
 
         LOG.debug('OVN-NB Sync distributed IPv6 completed @ %s',
                   str(datetime.now()))

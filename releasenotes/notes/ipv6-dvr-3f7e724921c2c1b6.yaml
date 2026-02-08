@@ -1,9 +1,28 @@
 ---
 features:
   - |
-    Add a new configuration option ``enable_distributed_ipv6`` in the ``[ovn]``
-    section (default: ``False``) to enable distributed IPv6.
-    When enabled, IPv6 GUA addresses are processed locally on
-    compute nodes rather than routing through the centralized gateway, reducing
-    network hops. This requires proper configuration of physical network
-    mappings (ovn-bridge-mappings) on all compute nodes.
+    Add distributed IPv6 support for OVN and options to control which
+    IPv6 addresses are exposed.
+
+    * ``enable_distributed_ipv6`` in the ``[ovn]`` section (default:
+      ``False``): When enabled, IPv6 GUA addresses are processed locally on
+      compute nodes rather than routing through the centralized gateway,
+      reducing network hops. This requires proper configuration of physical
+      network mappings (ovn-bridge-mappings) on all compute nodes.
+
+    * ``ipv6_dvr_exposure_mode`` in the ``[ovn]`` section (default:
+      ``gua``): Controls which IPv6 addresses get distributed NAT when
+      ``enable_distributed_ipv6`` is enabled.
+      * ``all``: Expose any IPv6 address.
+      * ``gua``: Expose only IPv6 Globally Unique Addresses (GUA)
+        (link-local and ULA are not exposed).
+      * ``address_scope``: Expose only IPv6 addresses from subnets whose
+        subnet pool is in one of the address scopes listed in
+        ``ipv6_dvr_address_scope_ids``.
+
+    * ``ipv6_dvr_address_scope_ids``: List of address scope IDs. Used when
+      ``ipv6_dvr_exposure_mode`` is ``address_scope``. Only subnets from
+      pools in these address scopes get distributed IPv6 NAT rules.
+
+    This allows operators to avoid exposing link-local or ULA IPv6
+    addresses for DVR, or to restrict DVR to specific address scopes.

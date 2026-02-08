@@ -1120,6 +1120,63 @@ class GetSubnetsAddressScopeTestCase(base.BaseTestCase):
         self.assertEqual(('scope4', 'scope6'), (address4, address6))
 
 
+class ShouldExposeIPv6ForDVRTestCase(base.BaseTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(cfg.CONF.reset)
+
+    def _set_dvr_and_mode(self, enable_dvr=True, mode='all',
+                          address_scope_ids=None):
+        cfg.CONF.set_override('enable_distributed_ipv6', enable_dvr,
+                              group='ovn')
+        cfg.CONF.set_override('ipv6_dvr_exposure_mode', mode, group='ovn')
+        cfg.CONF.set_override('ipv6_dvr_address_scope_ids',
+                              address_scope_ids or [], group='ovn')
+
+    def test_disabled_dvr_returns_false(self):
+        self._set_dvr_and_mode(enable_dvr=False, mode='all')
+        self.assertFalse(utils.should_expose_ipv6_for_dvr('2001:db8::1'))
+        self.assertFalse(utils.should_expose_ipv6_for_dvr('fd00::1'))
+
+    def test_mode_all_exposes_any_ipv6(self):
+        self._set_dvr_and_mode(enable_dvr=True, mode='all')
+        self.assertTrue(utils.should_expose_ipv6_for_dvr('2001:db8::1'))
+        self.assertTrue(utils.should_expose_ipv6_for_dvr('fd00::1'))
+
+    def test_mode_gua_exposes_only_global(self):
+        self._set_dvr_and_mode(enable_dvr=True, mode='gua')
+        # Use an address Python's ipaddress considers global (e.g. 2001:4860::
+        # is allocated GUA). 2001:db8:: and 2001:2:: are documentation/
+        # benchmark and have is_global False.
+        self.assertTrue(utils.should_expose_ipv6_for_dvr('2001:4860::1'))
+        self.assertFalse(utils.should_expose_ipv6_for_dvr('fd00::1'))
+
+    def test_mode_gua_invalid_address_returns_false(self):
+        self._set_dvr_and_mode(enable_dvr=True, mode='gua')
+        self.assertFalse(utils.should_expose_ipv6_for_dvr('not-an-ip'))
+
+    def test_mode_address_scope_no_scope_returns_false(self):
+        self._set_dvr_and_mode(enable_dvr=True, mode='address_scope',
+                               address_scope_ids=['scope1'])
+        self.assertFalse(utils.should_expose_ipv6_for_dvr(
+            '2001:db8::1', subnet_address_scope_id=None))
+
+    def test_mode_address_scope_scope_in_list_returns_true(self):
+        self._set_dvr_and_mode(enable_dvr=True, mode='address_scope',
+                               address_scope_ids=['scope1', 'scope2'])
+        self.assertTrue(utils.should_expose_ipv6_for_dvr(
+            '2001:db8::1', subnet_address_scope_id='scope1'))
+        self.assertTrue(utils.should_expose_ipv6_for_dvr(
+            'fd00::1', subnet_address_scope_id='scope2'))
+
+    def test_mode_address_scope_scope_not_in_list_returns_false(self):
+        self._set_dvr_and_mode(enable_dvr=True, mode='address_scope',
+                               address_scope_ids=['scope1'])
+        self.assertFalse(utils.should_expose_ipv6_for_dvr(
+            '2001:db8::1', subnet_address_scope_id='other_scope'))
+
+
 class GetPortTypeVirtualAndParentsTestCase(base.BaseTestCase):
 
     def test_no_subnets(self):

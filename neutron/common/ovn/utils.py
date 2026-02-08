@@ -14,6 +14,7 @@ import collections
 import copy
 import functools
 import inspect
+import ipaddress
 import os
 import random
 import typing
@@ -1096,6 +1097,34 @@ def get_subnets_address_scopes(context, subnets_by_id, fixed_ips, ml2_plugin):
             pass
 
     return address4_scope_id, address6_scope_id
+
+
+def should_expose_ipv6_for_dvr(ipv6_address, subnet_address_scope_id=None):
+    """Determine if an IPv6 address should be exposed for distributed IPv6.
+
+    :param ipv6_address: IPv6 address string.
+    :param subnet_address_scope_id: Address scope ID of the subnet's pool,
+        or None if subnet is not from a pool. Used when mode is
+        'address_scope'.
+    :returns: True if the address should be exposed for DVR, False otherwise.
+    """
+    if not ovn_conf.is_ovn_distributed_ipv6():
+        return False
+    mode = ovn_conf.get_ovn_ipv6_dvr_exposure_mode()
+    if mode == 'all':
+        return True
+    if mode == 'gua':
+        try:
+            addr = ipaddress.ip_address(ipv6_address)
+            return addr.is_global
+        except ValueError:
+            return False
+    if mode == 'address_scope':
+        if subnet_address_scope_id is None:
+            return False
+        allowed = ovn_conf.get_ovn_ipv6_dvr_address_scope_ids()
+        return subnet_address_scope_id in allowed
+    return False
 
 
 def get_high_prio_chassis_in_ha_chassis_group(ha_chassis_group):
