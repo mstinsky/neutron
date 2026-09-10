@@ -701,7 +701,7 @@ class OVNClient:
 
             if port.get('pvlan_type') and self.pvlan_driver:
                 self.pvlan_driver.create_port(context, txn, port)
-            self.create_distributed_ipv6(port, txn)
+            self.create_distributed_ipv6(context, port, txn)
 
         db_rev.bump_revision(context, port, ovn_const.TYPE_PORTS)
 
@@ -889,7 +889,7 @@ class OVNClient:
                 self.add_txns_to_remove_port_dns_records(
                     txn, port_object, ls_name=ls_name)
 
-            self.create_distributed_ipv6(port, txn)
+            self.create_distributed_ipv6(context, port, txn)
 
         if check_rev_cmd.result == ovn_const.TXN_COMMITTED:
             db_rev.bump_revision(context, port, ovn_const.TYPE_PORTS)
@@ -3485,6 +3485,26 @@ class OVNClient:
             lrouter_name, 'dnat_and_snat', ipv6_addr, ipv6_addr)
         return next(iter(lrouter_nats), None)
 
+    def get_ipv6_dvr_address_scopes(self, context):
+        """Returns the address scope of the subnet pools eligible for DVR
+
+        Only the subnet pools of the address scopes listed in
+        "ipv6_dvr_address_scope_ids" are read, and only when the configured
+        exposure mode looks at the address scope at all, so that callers
+        iterating over many ports resolve them once instead of per port.
+
+        :param context: Neutron request context.
+        :return: (dict) {subnetpool_id: address_scope_id}, empty if the
+                 exposure mode does not filter on the address scope.
+        """
+        scope_ids = ovn_conf.get_ovn_ipv6_dvr_address_scope_ids()
+        if not utils.ipv6_dvr_exposure_needs_address_scope() or not scope_ids:
+            return {}
+        subnetpools = self._plugin.get_subnetpools(
+            context.elevated(), filters={'address_scope_id': scope_ids})
+        return {subnetpool['id']: subnetpool['address_scope_id']
+                for subnetpool in subnetpools}
+
     def _update_dvr_nat_ipv6(self, context, router_id, port_id, create_rule,
                              txn):
         """Update the VM IPv6 NAT rule attached to the router port
@@ -3508,8 +3528,9 @@ class OVNClient:
         filters = {'device_id': [router_id]}
         router_ports = self._plugin.get_ports(admin_context, filters=filters)
         db_ipv6s = []
+        address_scopes = self.get_ipv6_dvr_address_scopes(admin_context)
         # Get the Neutron ports linked to each router network and filter by
-        # device owner compute with ipv6_address_mode on the subnet
+        # device owner compute and IPv6 subnets
         for router_port in router_ports:
             filters = {'network_id': [router_port['network_id']]}
             db_ports = self._plugin.get_ports(admin_context, filters=filters)
@@ -3520,18 +3541,30 @@ class OVNClient:
                 for ip in port.get('fixed_ips', []):
                     subnet = self._plugin.get_subnet(admin_context,
                                                      ip['subnet_id'])
-                    if subnet and subnet['ipv6_address_mode'] is not None:
+                    if (subnet and
+                            subnet['ip_version'] == const.IP_VERSION_6):
                         # The router can have both IPv4 and IPv6 subnet linked
                         # to the same 'VM' port, make sure we don't insert it
                         # twice.
                         if not self._check_duplicated_ipv6_rule(
                                 port, db_ipv6s):
-                            db_ipv6s.append({'ip': ip['ip_address'],
-                                             'port': port})
+                            # The exposure check only gates the creation of
+                            # the rule, existing rules are always removed so
+                            # that a change of the exposure mode does not
+                            # leave them behind.
+                            db_ipv6s.append(
+                                {'ip': ip['ip_address'],
+                                 'port': port,
+                                 'expose': utils.should_expose_ipv6_for_dvr(
+                                     ip['ip_address'],
+                                     address_scopes.get(
+                                         subnet.get('subnetpool_id')))})
 
         gw_lrouter_name = utils.ovn_name(router_id)
         for db_ipv6 in db_ipv6s:
             if create_rule:
+                if not db_ipv6['expose']:
+                    continue
                 db_port = db_ipv6['port']
                 # Skip the previously existing rule if for some reason it is
                 # already applied
@@ -3563,12 +3596,13 @@ class OVNClient:
                     logical_ip=db_ipv6['ip'],
                     external_ip=db_ipv6['ip']))
 
-    def create_distributed_ipv6(self, port, txn):
+    def create_distributed_ipv6(self, context, port, txn):
         """Create the IPv6 NAT rule for the DVR scenario
 
         Use the ipv6 address attached to the subnet of the port to
         create the IPv6 NAT rule.
 
+        :param context: Neutron request context.
         :param port: Port object.
         :param txn: The ovsdbapp transaction object.
         """
@@ -3579,9 +3613,18 @@ class OVNClient:
                 const.DEVICE_OWNER_COMPUTE_PREFIX):
             return
 
+        admin_context = context.elevated()
+        address_scopes = self.get_ipv6_dvr_address_scopes(admin_context)
         for ip in port.get('fixed_ips', []):
             if common_utils.get_ip_version(ip['ip_address']) == \
                     const.IP_VERSION_4:
+                continue
+            subnet = self._plugin.get_subnet(admin_context, ip['subnet_id'])
+            if not subnet:
+                continue
+            if not utils.should_expose_ipv6_for_dvr(
+                    ip['ip_address'],
+                    address_scopes.get(subnet.get('subnetpool_id'))):
                 continue
             # Get the Logical_Router attached to that IPv6 subnet address
             lrp_port = self._nb_idl.get_logical_router_ports_by_subnet_ids(

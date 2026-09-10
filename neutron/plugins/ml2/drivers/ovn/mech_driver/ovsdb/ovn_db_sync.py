@@ -1819,15 +1819,16 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
         return any(rule['data'] == db_ipv6['data'] for rule in rules)
 
     def _calculate_distributed_ipv6_differences(self, ovn_nats, router,
-                                                ctx):
+                                                ctx, address_scopes=None):
         router_ports = []
+        address_scopes = address_scopes or {}
         # Skip the neutron side check if ovn distributed flag is disabled
         if ovn_conf.is_ovn_distributed_ipv6():
             filters = {'device_id': [router['id']]}
             router_ports = self.core_plugin.get_ports(ctx, filters=filters)
         db_ipv6s = []
         # Get the Neutron ports linked to each router network and filter by
-        # device owner compute with ipv6_address_mode on the subnet
+        # device owner compute and IPv6 subnets
         for router_port in router_ports:
             filters = {'network_id': [router_port['network_id']]}
             db_ports = self.core_plugin.get_ports(ctx, filters=filters)
@@ -1838,7 +1839,16 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
                 for ip in port.get('fixed_ips', []):
                     subnet = self.core_plugin.get_subnet(ctx,
                                                          ip['subnet_id'])
-                    if subnet and subnet['ipv6_address_mode'] is not None:
+                    if (subnet and
+                            subnet['ip_version'] == constants.IP_VERSION_6):
+                        # Addresses the operator does not want to expose are
+                        # left out of the Neutron side, so any rule already
+                        # in OVN for them ends up in the "to remove" list.
+                        if not utils.should_expose_ipv6_for_dvr(
+                                ip['ip_address'],
+                                address_scopes.get(
+                                    subnet.get('subnetpool_id'))):
+                            continue
                         # Get the Logical_Router attached to that IPv6 subnet
                         # address
                         rf = {'fixed_ips': {'subnet_id':
@@ -1882,6 +1892,7 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
         LOG.debug('OVN-NB Sync distributed IPv6 started @ %s',
                   str(datetime.now()))
         update_ipv6_list = []
+        address_scopes = self._ovn_client.get_ipv6_dvr_address_scopes(ctx)
         # Get all router NAT rules to compare the differences
         for router in self.l3_plugin.get_routers(ctx):
             ovn_nat = []
@@ -1897,7 +1908,7 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
 
             add_nat_ipv6, del_nat_ipv6 = \
                 self._calculate_distributed_ipv6_differences(
-                    ovn_nat, router, ctx)
+                    ovn_nat, router, ctx, address_scopes=address_scopes)
             update_ipv6_list.append({'id': router['id'],
                                      'add': add_nat_ipv6,
                                      'del': del_nat_ipv6})
@@ -1922,7 +1933,7 @@ class OvnNbSynchronizer(db_sync_base.BaseOvnDbSynchronizer):
                         LOG.warning("Add distributed IPv6 %s to OVN NB DB",
                                     nat['ip'])
                         self._ovn_client.create_distributed_ipv6(
-                            nat['data'], txn)
+                            ctx, nat['data'], txn)
 
         LOG.debug('OVN-NB Sync distributed IPv6 completed @ %s',
                   str(datetime.now()))

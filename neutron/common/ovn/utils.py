@@ -14,6 +14,7 @@ import collections
 import copy
 import functools
 import inspect
+import ipaddress
 import os
 import random
 import threading
@@ -1176,6 +1177,53 @@ def get_subnets_address_scopes(context, subnets_by_id, fixed_ips, ml2_plugin):
             pass
 
     return address4_scope_id, address6_scope_id
+
+
+def ipv6_dvr_exposure_needs_address_scope():
+    """Returns True if the distributed IPv6 filter needs the address scope
+
+    Callers use this to avoid the extra subnet pool lookup needed to resolve
+    the address scope of a subnet when the configured exposure mode does not
+    take the address scope into account.
+    """
+    return (ovn_conf.is_ovn_distributed_ipv6() and
+            ovn_conf.get_ovn_ipv6_dvr_exposure_mode() ==
+            constants.IPV6_DVR_EXPOSURE_ADDRESS_SCOPE)
+
+
+def should_expose_ipv6_for_dvr(ipv6_address, address_scope_id=None):
+    """Return True if an IPv6 address should be exposed for distributed IPv6.
+
+    The exposure policy is controlled by ``ipv6_dvr_exposure_mode``:
+
+    * ``all``: every IPv6 address is exposed.
+    * ``gua``: only globally routable addresses (``is_global``) are exposed.
+    * ``address_scope``: only addresses allocated from a subnet pool whose
+      address scope is listed in ``ipv6_dvr_address_scope_ids`` are exposed.
+
+    :param ipv6_address: (string) IPv6 address of the port.
+    :param address_scope_id: (string) address scope ID of the subnet the
+                             address was allocated from, or None if the
+                             subnet has no subnet pool or the subnet pool has
+                             no address scope. Only used by the
+                             ``address_scope`` mode.
+    :return: (bool) True if the address should be exposed for DVR.
+    """
+    if not ovn_conf.is_ovn_distributed_ipv6():
+        return False
+
+    mode = ovn_conf.get_ovn_ipv6_dvr_exposure_mode()
+    if mode == constants.IPV6_DVR_EXPOSURE_ALL:
+        return True
+    if mode == constants.IPV6_DVR_EXPOSURE_GUA:
+        try:
+            return ipaddress.ip_address(ipv6_address).is_global
+        except ValueError:
+            return False
+    if mode == constants.IPV6_DVR_EXPOSURE_ADDRESS_SCOPE:
+        return bool(address_scope_id) and (
+            address_scope_id in ovn_conf.get_ovn_ipv6_dvr_address_scope_ids())
+    return False
 
 
 def get_high_prio_chassis_in_ha_chassis_group(ha_chassis_group):

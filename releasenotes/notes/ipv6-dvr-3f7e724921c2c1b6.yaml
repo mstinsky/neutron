@@ -2,8 +2,36 @@
 features:
   - |
     Add a new configuration option ``enable_distributed_ipv6`` in the ``[ovn]``
-    section (default: ``False``) to enable distributed IPv6.
-    When enabled, IPv6 GUA addresses are processed locally on
-    compute nodes rather than routing through the centralized gateway, reducing
-    network hops. This requires proper configuration of physical network
-    mappings (ovn-bridge-mappings) on all compute nodes.
+    section (default: ``False``) to enable distributed IPv6. When enabled,
+    IPv6 GUA addresses are processed locally on compute nodes rather than
+    routing through the centralized gateway, reducing network hops. This
+    requires proper configuration of physical network mappings
+    (ovn-bridge-mappings) on all compute nodes.
+
+    A new configuration option ``ipv6_dvr_exposure_mode`` (default: ``gua``)
+    restricts which IPv6 addresses are distributed when
+    ``enable_distributed_ipv6`` is enabled:
+
+    * ``all``: every IPv6 address is exposed.
+    * ``gua``: only globally routable addresses are exposed, as reported by
+      Python ``ipaddress.IPv6Address.is_global``. Unique local (``fc00::/7``),
+      link local (``fe80::/10``) and documentation (``2001:db8::/32``)
+      prefixes are therefore not exposed.
+    * ``address_scope``: only addresses allocated from a subnet pool that
+      belongs to one of the address scopes listed in the new
+      ``ipv6_dvr_address_scope_ids`` option are exposed.
+
+    Rules that no longer match the configured mode are removed from the OVN
+    northbound database by ``neutron-ovn-db-sync-util`` in ``repair`` mode.
+
+    A distributed IPv6 address is announced, through neighbour advertisements,
+    by the compute node hosting it directly on the L2 segment of the router
+    external gateway. Unlike an IPv4 floating IP, the address belongs to a
+    tenant subnet and not to the external subnet, so a project that is allowed
+    to create subnets with arbitrary CIDRs can make a compute node announce a
+    prefix the project does not own. Operators enabling
+    ``enable_distributed_ipv6`` should therefore set
+    ``ipv6_dvr_exposure_mode`` to ``address_scope`` and enforce subnet pools,
+    which limits exposure to prefixes the operator allocated. The default
+    ``gua`` mode only prevents non routable addresses from leaking onto the
+    external segment and does not protect against prefix hijacking.

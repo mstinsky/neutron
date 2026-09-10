@@ -75,6 +75,15 @@ DVR will be used for IPv6 GUAs if the ovn / enable_distributed_ipv6
 flag is configured to True in the neutron server configuration, being
 a deployment wide setting.
 
+A distributed IPv6 address is announced by the compute node hosting it
+directly on the L2 segment of the router external gateway. Unlike an IPv4
+floating IP, that address belongs to a tenant subnet and not to the external
+subnet, so a project allowed to create subnets with arbitrary CIDRs can make
+a compute node announce a prefix it does not own. Use the ovn /
+ipv6_dvr_exposure_mode setting to restrict which addresses are distributed;
+the ``address_scope`` mode, combined with enforced subnet pools, is the only
+mode that prevents this.
+
 Although ovn driver does not expose the "distributed" flag of routers
 throught the API.
 

@@ -513,6 +513,12 @@ OVN_SUPPORTED_VNIC_TYPES = [portbindings.VNIC_NORMAL,
 OVN_L3_SCHEDULER_LEASTLOADED = 'leastloaded'
 OVN_L3_SCHEDULER_CHANCE = 'chance'
 
+# Distributed IPv6 exposure modes, see the "ipv6_dvr_exposure_mode"
+# configuration option.
+IPV6_DVR_EXPOSURE_ALL = 'all'
+IPV6_DVR_EXPOSURE_GUA = 'gua'
+IPV6_DVR_EXPOSURE_ADDRESS_SCOPE = 'address_scope'
+
 # HA failover options.
 # These are the default values defined in OVN.
 OVN_BFD_MIN_RX = 1000

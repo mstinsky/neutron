@@ -144,7 +144,48 @@ ovn_opts = [
                        'locally and not in the centralized gateway. This '
                        'saves the path to the external network. This requires '
                        'the user to configure the physical network map '
-                       '(i.e. ovn-bridge-mappings) on each compute node.')),
+                       '(i.e. ovn-bridge-mappings) on each compute node.\n'
+                       'See "ipv6_dvr_exposure_mode" to restrict which IPv6 '
+                       'addresses are exposed.')),
+    cfg.StrOpt('ipv6_dvr_exposure_mode',
+               default=ovn_const.IPV6_DVR_EXPOSURE_GUA,
+               choices=[
+                   (ovn_const.IPV6_DVR_EXPOSURE_ALL,
+                    _('Expose every IPv6 address, including ULA and other '
+                      'non globally routable addresses.')),
+                   (ovn_const.IPV6_DVR_EXPOSURE_GUA,
+                    _('Expose only globally routable IPv6 addresses, as '
+                      'reported by Python "ipaddress.IPv6Address.is_global". '
+                      'Note that documentation (2001:db8::/32), ULA '
+                      '(fc00::/7) and link local (fe80::/10) prefixes are '
+                      'not considered global.')),
+                   (ovn_const.IPV6_DVR_EXPOSURE_ADDRESS_SCOPE,
+                    _('Expose only IPv6 addresses allocated from a subnet '
+                      'pool belonging to one of the address scopes listed in '
+                      '"ipv6_dvr_address_scope_ids".')),
+               ],
+               help=_('Restrict which IPv6 addresses are exposed when '
+                      '"enable_distributed_ipv6" is True. Ignored '
+                      'otherwise.\n'
+                      'A distributed IPv6 address is announced by the '
+                      'compute node hosting it directly on the L2 segment of '
+                      'the router external gateway. Because the address '
+                      'belongs to a tenant subnet and not to the external '
+                      'subnet, a project that is allowed to pick arbitrary '
+                      'subnet CIDRs can announce a prefix it does not own. '
+                      'Only the "address_scope" mode prevents this, since it '
+                      'restricts exposure to prefixes allocated from '
+                      'operator controlled subnet pools. The "gua" mode only '
+                      'avoids leaking non routable addresses onto the '
+                      'external segment and is not a security boundary.')),
+    cfg.ListOpt('ipv6_dvr_address_scope_ids',
+                default=[],
+                help=_('List of address scope IDs whose IPv6 addresses are '
+                       'exposed when "ipv6_dvr_exposure_mode" is '
+                       '"address_scope". Addresses allocated from a subnet '
+                       'that has no subnet pool, or whose subnet pool has no '
+                       'address scope, are never exposed in that mode. '
+                       'Ignored for the other modes.')),
     cfg.StrOpt("vhost_sock_dir",
                default="/var/run/openvswitch",
                help=_("The directory in which vhost virtio sockets "
@@ -436,6 +477,14 @@ def get_ovn_lm_activation_strategy():
 
 def is_ovn_distributed_ipv6():
     return cfg.CONF.ovn.enable_distributed_ipv6
+
+
+def get_ovn_ipv6_dvr_exposure_mode():
+    return cfg.CONF.ovn.ipv6_dvr_exposure_mode
+
+
+def get_ovn_ipv6_dvr_address_scope_ids():
+    return cfg.CONF.ovn.ipv6_dvr_address_scope_ids
 
 
 def get_ovn_vhost_sock_dir():

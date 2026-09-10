@@ -1821,8 +1821,40 @@ class TestDistributedIPv6(base.TestOVNFunctionalBase):
         res = req.get_response(self.api)
         return self.deserialize(self.fmt, res)['port']
 
-    def _test_dvr_ipv6(self):
+    def _create_address_scope_and_pool(self, prefix):
+        """Returns a shared IPv6 subnet pool and its address scope ID"""
+        data = {'address_scope': {'name': 'dvr_scope',
+                                  'ip_version': constants.IP_VERSION_6,
+                                  'shared': True,
+                                  'tenant_id': self._project_id}}
+        req = self.new_create_request('address-scopes', data, self.fmt,
+                                      as_admin=True)
+        scope = self.deserialize(
+            self.fmt, req.get_response(self.api))['address_scope']
 
+        data = {'subnetpool': {'name': 'dvr_pool',
+                               'prefixes': [prefix],
+                               'default_prefixlen': 64,
+                               'shared': True,
+                               'address_scope_id': scope['id'],
+                               'tenant_id': self._project_id}}
+        req = self.new_create_request('subnetpools', data, self.fmt,
+                                      as_admin=True)
+        pool = self.deserialize(
+            self.fmt, req.get_response(self.api))['subnetpool']
+        return pool, scope['id']
+
+    def _create_dvr_topology(self, cidrs, subnetpool_id=None):
+        """Creates a router with an external gateway and IPv6 subnets
+
+        :param cidrs: (list of string) CIDR of each internal IPv6 subnet,
+                      all created on the same network and attached to the
+                      router.
+        :param subnetpool_id: (string) optional subnet pool the internal
+                              subnets are allocated from.
+        :return: (tuple) the router, the internal network, the list of
+                 internal subnets and the list of router interfaces.
+        """
         kwargs = {'arg_list': ('router:external',),
                   'router:external': True}
         ext_net = self._make_network(
@@ -1833,19 +1865,22 @@ class TestDistributedIPv6(base.TestOVNFunctionalBase):
             ext_net['id'],
             **{'cidr': '2001:db8:4321::/64',
                'gateway_ip': '2001:db8:4321::1',
-               'ip_version': 6,
+               'ip_version': constants.IP_VERSION_6,
                'enable_dhcp': False})
-        dvr_net = self._make_network(
-            self.fmt, 'dvr_nettest', True)['network']
-        dvr_subnet = self._create_subnet(
-            'dvr_subnettest',
-            dvr_net['id'],
-            **{'cidr': '2001:db8:1234::/64',
-               'gateway_ip': '2001:db8:1234::1',
-               'enable_dhcp': True,
-               'ipv6_address_mode': 'dhcpv6-stateful',
-               'ipv6_ra_mode': 'dhcpv6-stateful',
-               'ip_version': 6})
+
+        dvr_net = self._make_network(self.fmt, 'dvr_nettest', True)['network']
+        dvr_subnets = []
+        for index, cidr in enumerate(cidrs):
+            subnet_args = {'cidr': cidr,
+                           'enable_dhcp': True,
+                           'ipv6_address_mode': 'dhcpv6-stateful',
+                           'ipv6_ra_mode': 'dhcpv6-stateful',
+                           'ip_version': constants.IP_VERSION_6}
+            if subnetpool_id:
+                subnet_args['subnetpool_id'] = subnetpool_id
+            dvr_subnets.append(self._create_subnet(
+                'dvr_subnet%dtest' % index, dvr_net['id'], **subnet_args))
+
         external_gateway_info = {
             'enable_snat': True,
             'network_id': ext_net['id'],
@@ -1854,182 +1889,128 @@ class TestDistributedIPv6(base.TestOVNFunctionalBase):
                  'subnet_id': ext_subnet['id']}]}
         router = self._create_router(
             'routertest', external_gateway_info=external_gateway_info)
-        self._add_router_interface(router['id'], dvr_subnet['id'])
+        router_ifs = [self._add_router_interface(router['id'],
+                                                 dvr_subnet['id'])
+                      for dvr_subnet in dvr_subnets]
+        return router, dvr_net, dvr_subnets, router_ifs
 
-        p1 = self._create_port('testp1', dvr_net['id'],
-                               device_owner='compute:nova')
-        logical_ip = p1['fixed_ips'][0]['ip_address']
+    def _create_vm_port_and_find_nat_rule(self, router, net, name='testp1'):
+        """Returns the DVR NAT rule of a new VM port, if any"""
+        port = self._create_port(name, net['id'],
+                                 device_owner='compute:nova')
+        logical_ip = port['fixed_ips'][0]['ip_address']
+        return port, self._find_nat_rule(router['id'], logical_ip, logical_ip)
 
-        if ovn_conf.is_ovn_distributed_ipv6():
-            self.assertIsNotNone(
-                self._find_nat_rule(router['id'], logical_ip, logical_ip))
-        else:
-            self.assertIsNone(
-                self._find_nat_rule(router['id'], logical_ip, logical_ip))
+    def _enable_dvr_ipv6(self, mode='all', address_scope_ids=None):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode', mode,
+                                       group='ovn')
+        if address_scope_ids is not None:
+            ovn_conf.cfg.CONF.set_override('ipv6_dvr_address_scope_ids',
+                                           address_scope_ids, group='ovn')
 
     def test_dvr_ipv6_enabled(self):
-        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
-                                       group='ovn')
-        self._test_dvr_ipv6()
+        # The subnets use the 2001:db8::/32 documentation prefix, which is
+        # not a GUA and would be filtered out by the default "gua" mode.
+        self._enable_dvr_ipv6(mode='all')
+        router, net, _, _ = self._create_dvr_topology(['2001:db8:1234::/64'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNotNone(nat_rule)
 
     def test_dvr_ipv6_disabled(self):
-        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'False',
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', False,
                                        group='ovn')
-        self._test_dvr_ipv6()
+        router, net, _, _ = self._create_dvr_topology(['2001:db8:1234::/64'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNone(nat_rule)
+
+    def test_dvr_ipv6_port_deleted(self):
+        self._enable_dvr_ipv6(mode='all')
+        router, net, _, _ = self._create_dvr_topology(['2001:db8:1234::/64'])
+        port, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNotNone(nat_rule)
+
+        logical_ip = port['fixed_ips'][0]['ip_address']
+        self._delete('ports', port['id'], as_admin=True)
+        self.assertIsNone(
+            self._find_nat_rule(router['id'], logical_ip, logical_ip))
 
     def test_dvr_ipv6_router_port(self):
-        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
-                                       group='ovn')
+        """The router port itself must not get a distributed NAT rule."""
+        self._enable_dvr_ipv6(mode='all')
+        router, net, _subnets, router_ifs = self._create_dvr_topology(
+            ['2001:db8:1234::/64'])
 
-        kwargs = {'arg_list': ('router:external',),
-                  'router:external': True}
-        ext_net = self._make_network(
-            self.fmt, 'ext_networktest', True, as_admin=True,
-            **kwargs)['network']
-        ext_subnet = self._create_subnet(
-            'ext_subnettest',
-            ext_net['id'],
-            **{'cidr': '2001:db8:4321::/64',
-               'gateway_ip': '2001:db8:4321::1',
-               'ip_version': 6,
-               'enable_dhcp': False})
-        dvr_net = self._make_network(
-            self.fmt, 'dvr_nettest', True)['network']
-        dvr_subnet = self._create_subnet(
-            'dvr_subnettest',
-            dvr_net['id'],
-            **{'cidr': '2001:db8:1234::/64',
-               'gateway_ip': '2001:db8:1234::1',
-               'enable_dhcp': True,
-               'ipv6_address_mode': 'dhcpv6-stateful',
-               'ipv6_ra_mode': 'dhcpv6-stateful',
-               'ip_version': 6})
-        external_gateway_info = {
-            'enable_snat': True,
-            'network_id': ext_net['id'],
-            'external_fixed_ips': [
-                {'ip_address': '2001:db8:4321::2',
-                 'subnet_id': ext_subnet['id']}]}
-        router = self._create_router(
-            'routertest', external_gateway_info=external_gateway_info)
-        router_if = self._add_router_interface(router['id'], dvr_subnet['id'])
         router_port = self._ovn_client._plugin.get_port(
-            self.context, router_if['port_id'])
+            self.context, router_ifs[0]['port_id'])
         logical_rip = router_port['fixed_ips'][0]['ip_address']
-
         self.assertIsNone(
             self._find_nat_rule(router['id'], logical_rip, logical_rip))
 
-        # Create VM port
-        p1 = self._create_port('testp1', dvr_net['id'],
-                               device_owner='compute:nova')
-        logical_ip = p1['fixed_ips'][0]['ip_address']
-        self.assertIsNotNone(
-            self._find_nat_rule(router['id'], logical_ip, logical_ip))
-
-        # Create VM 2 port
-        p2 = self._create_port('testp1', dvr_net['id'],
-                               device_owner='compute:nova')
-        logical_ip_p2 = p2['fixed_ips'][0]['ip_address']
-        self.assertIsNotNone(
-            self._find_nat_rule(router['id'], logical_ip_p2, logical_ip_p2))
-
-        # Remove router port - VM subnet
-        self._ovn_client.delete_router_port(self.context, router_port['id'],
-            router['id'])
-        self._remove_router_interface(router['id'], dvr_subnet['id'])
-
+        # A VM port on the same subnet still gets one.
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNotNone(nat_rule)
         self.assertIsNone(
-            self._find_nat_rule(router['id'], logical_ip, logical_ip))
-
-        self.assertIsNone(
-            self._find_nat_rule(router['id'], logical_ip_p2, logical_ip_p2))
-
-        # Create router port - add VM subnet
-        self._add_router_interface(router['id'], dvr_subnet['id'])
-
-        self.assertIsNotNone(
-            self._find_nat_rule(router['id'], logical_ip, logical_ip))
-
-        self.assertIsNotNone(
-            self._find_nat_rule(router['id'], logical_ip_p2, logical_ip_p2))
+            self._find_nat_rule(router['id'], logical_rip, logical_rip))
 
     def test_dvr_ipv6_port_multiple_subnets(self):
-        """Test DVR IPv6 NAT rules for a port with multiple IPv6 subnets.
+        """Every IPv6 address of a port gets its own NAT rule."""
+        self._enable_dvr_ipv6(mode='all')
+        router, net, subnets, _router_ifs = self._create_dvr_topology(
+            ['2001:db8:1234::/64', '2001:db8:5678::/64'])
 
-        A port can have multiple IPv6 addresses, each in a different subnet.
-        Each address must get its own NAT rule on the router for that subnet.
-        """
-        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
-                                       group='ovn')
+        ip1, ip2 = '2001:db8:1234::10', '2001:db8:5678::10'
+        port = self._create_port(
+            'testp_multi', net['id'], device_owner='compute:nova',
+            fixed_ips=[{'subnet_id': subnets[0]['id'], 'ip_address': ip1},
+                       {'subnet_id': subnets[1]['id'], 'ip_address': ip2}])
 
-        kwargs = {'arg_list': ('router:external',),
-                  'router:external': True}
-        ext_net = self._make_network(
-            self.fmt, 'ext_networktest', True, as_admin=True,
-            **kwargs)['network']
-        ext_subnet = self._create_subnet(
-            'ext_subnettest',
-            ext_net['id'],
-            **{'cidr': '2001:db8:4321::/64',
-               'gateway_ip': '2001:db8:4321::1',
-               'ip_version': 6,
-               'enable_dhcp': False})
-
-        dvr_net = self._make_network(
-            self.fmt, 'dvr_nettest', True)['network']
-        dvr_subnet1 = self._create_subnet(
-            'dvr_subnet1test',
-            dvr_net['id'],
-            **{'cidr': '2001:db8:1234::/64',
-               'gateway_ip': '2001:db8:1234::1',
-               'enable_dhcp': True,
-               'ipv6_address_mode': 'dhcpv6-stateful',
-               'ipv6_ra_mode': 'dhcpv6-stateful',
-               'ip_version': 6})
-        dvr_subnet2 = self._create_subnet(
-            'dvr_subnet2test',
-            dvr_net['id'],
-            **{'cidr': '2001:db8:5678::/64',
-               'gateway_ip': '2001:db8:5678::1',
-               'enable_dhcp': True,
-               'ipv6_address_mode': 'dhcpv6-stateful',
-               'ipv6_ra_mode': 'dhcpv6-stateful',
-               'ip_version': 6})
-
-        external_gateway_info = {
-            'enable_snat': True,
-            'network_id': ext_net['id'],
-            'external_fixed_ips': [
-                {'ip_address': '2001:db8:4321::2',
-                 'subnet_id': ext_subnet['id']}]}
-        router = self._create_router(
-            'routertest', external_gateway_info=external_gateway_info)
-        self._add_router_interface(router['id'], dvr_subnet1['id'])
-        self._add_router_interface(router['id'], dvr_subnet2['id'])
-
-        fixed_ips = [
-            {'subnet_id': dvr_subnet1['id'],
-             'ip_address': '2001:db8:1234::10'},
-            {'subnet_id': dvr_subnet2['id'],
-             'ip_address': '2001:db8:5678::10'},
-        ]
-        port = self._create_port('testp_multi', dvr_net['id'],
-                                device_owner='compute:nova',
-                                fixed_ips=fixed_ips)
-
-        ip1 = '2001:db8:1234::10'
-        ip2 = '2001:db8:5678::10'
-        self.assertIsNotNone(
-            self._find_nat_rule(router['id'], ip1, ip1),
-            'NAT rule for first IPv6 subnet should exist')
-        self.assertIsNotNone(
-            self._find_nat_rule(router['id'], ip2, ip2),
-            'NAT rule for second IPv6 subnet should exist')
+        self.assertIsNotNone(self._find_nat_rule(router['id'], ip1, ip1),
+                             'NAT rule for first IPv6 subnet should exist')
+        self.assertIsNotNone(self._find_nat_rule(router['id'], ip2, ip2),
+                             'NAT rule for second IPv6 subnet should exist')
 
         # Delete the port and verify both NAT rules are removed
         self._delete('ports', port['id'], as_admin=True)
-        self.assertIsNone(
-            self._find_nat_rule(router['id'], ip1, ip1))
-        self.assertIsNone(
-            self._find_nat_rule(router['id'], ip2, ip2))
+        self.assertIsNone(self._find_nat_rule(router['id'], ip1, ip1))
+        self.assertIsNone(self._find_nat_rule(router['id'], ip2, ip2))
+
+    def test_dvr_ipv6_mode_gua_exposes_gua(self):
+        self._enable_dvr_ipv6(mode='gua')
+        router, net, _, _ = self._create_dvr_topology(['2001:4860::/64'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNotNone(nat_rule)
+
+    def test_dvr_ipv6_mode_gua_skips_ula(self):
+        self._enable_dvr_ipv6(mode='gua')
+        router, net, _, _ = self._create_dvr_topology(['fd00:1234::/64'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNone(nat_rule)
+
+    def test_dvr_ipv6_mode_address_scope_allowed(self):
+        pool, scope_id = self._create_address_scope_and_pool('2001:4860::/32')
+        self._enable_dvr_ipv6(mode='address_scope',
+                              address_scope_ids=[scope_id])
+        router, net, _, _ = self._create_dvr_topology(['2001:4860:1::/64'],
+                                                   subnetpool_id=pool['id'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNotNone(nat_rule)
+
+    def test_dvr_ipv6_mode_address_scope_not_allowed(self):
+        pool, _scope_id = self._create_address_scope_and_pool('2001:4860::/32')
+        self._enable_dvr_ipv6(mode='address_scope',
+                              address_scope_ids=[uuidutils.generate_uuid()])
+        router, net, _, _ = self._create_dvr_topology(['2001:4860:1::/64'],
+                                                   subnetpool_id=pool['id'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNone(nat_rule)
+
+    def test_dvr_ipv6_mode_address_scope_without_subnetpool(self):
+        _pool, scope_id = self._create_address_scope_and_pool('2001:4860::/32')
+        self._enable_dvr_ipv6(mode='address_scope',
+                              address_scope_ids=[scope_id])
+        # A GUA outside of any subnet pool is not exposed.
+        router, net, _, _ = self._create_dvr_topology(['2001:4860:2::/64'])
+        _, nat_rule = self._create_vm_port_and_find_nat_rule(router, net)
+        self.assertIsNone(nat_rule)

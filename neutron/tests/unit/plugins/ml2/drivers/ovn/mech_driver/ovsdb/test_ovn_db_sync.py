@@ -1377,130 +1377,147 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
                                                        expected_added,
                                                        expected_deleted)
 
-    def _test_ovn_nb_sync_calculate_ipv6_dvr_helper(self,
-                                                    ovn_nat,
-                                                    router,
-                                                    expected_added,
-                                                    expected_deleted,
-                                                    fake_ports):
+    def _calculate_ipv6_dvr_differences(self, ovn_nats=None,
+                                        ip_address='2001:db8:1234::22',
+                                        subnet_attrs=None, subnetpools=None,
+                                        fake_ports=True):
+        """Returns the (to_add, to_remove) distributed IPv6 NAT rules"""
+        db_port = {'id': 'p1r1',
+                   'fixed_ips': [{'subnet_id': 'subnet1',
+                                  'ip_address': ip_address}],
+                   'network_id': 'network-r1',
+                   'device_owner': 'compute:nova',
+                   'device_id': 'neutron-r1',
+                   'mac_address': '01:01:01:01:01:01'}
+        db_subnet = {'id': 'subnet1',
+                     'ip_version': 6,
+                     'cidr': '%s/64' % ip_address,
+                     'enable_dhcp': True,
+                     'ipv6_address_mode': 'dhcpv6-stateful',
+                     'subnetpool_id': None,
+                     'dns_nameservers': [],
+                     'host_routes': []}
+        db_subnet.update(subnet_attrs or {})
+
         ovn_nb_synchronizer = ovn_db_sync.OvnNbSynchronizer(
             self.plugin, self.mech_driver,
             n_lib_ovn_const.OVN_DB_SYNC_MODE_REPAIR)
+        # Do not return any port in the deletion case: the calculation calls
+        # get_ports with two different filters and a single mocked return
+        # value cannot tell them apart.
+        ovn_nb_synchronizer.core_plugin.get_ports = mock.Mock(
+            return_value=[db_port] if fake_ports else [])
+        ovn_nb_synchronizer.core_plugin.get_subnet = mock.Mock(
+            return_value=db_subnet)
+
         ctx = context.get_admin_context()
+        with mock.patch.object(self.mech_driver._plugin, 'get_subnetpools',
+                               return_value=subnetpools or []):
+            return ovn_nb_synchronizer._calculate_distributed_ipv6_differences(
+                ovn_nats or [], {'id': 'r1'}, ctx,
+                address_scopes=ovn_nb_synchronizer._ovn_client.
+                get_ipv6_dvr_address_scopes(ctx))
 
-        db_port = [{'id': 'p1r1',
-                    'fixed_ips': [
-                        {'subnet_id': 'subnet1',
-                         'ip_address': '2001:db8:1234::22'}],
-                    'network_id': 'network-r1',
-                    'device_owner': 'compute:nova',
-                    'device_id': 'neutron-r1',
-                    'mac_address': '01:01:01:01:01:01'}]
-
-        ovn_nb_synchronizer.core_plugin.get_ports = mock.Mock()
-        # Do not return any ports in deletion case because the calc method
-        # will call the get_ports with 2 different kinf of filters, and this
-        # breaks the return value of the get_ports mock.
-        if fake_ports:
-            ovn_nb_synchronizer.core_plugin.get_ports.return_value = db_port
-        else:
-            ovn_nb_synchronizer.core_plugin.get_ports.return_value = []
-
-        db_subnet = {'id': 'subnet1',
-                     'ip_version': 6,
-                     'cidr': '2001:db8:1234::0/64',
-                     'enable_dhcp': True,
-                     'ipv6_address_mode': 'dhcpv6-stateful',
-                     'dns_nameservers': [],
-                     'host_routes': []}
-
-        ovn_nb_synchronizer.core_plugin.get_subnet = mock.Mock()
-        ovn_nb_synchronizer.core_plugin.get_subnet.return_value = db_subnet
-
-        add_routes, del_routes = ovn_nb_synchronizer. \
-            _calculate_distributed_ipv6_differences(ovn_nat,
-                                                    router, ctx)
-        self.assertEqual(add_routes, expected_added)
-        self.assertEqual(del_routes, expected_deleted)
+    def _enable_dvr_ipv6(self, mode='all', address_scope_ids=None):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', True,
+                                       group='ovn')
+        ovn_conf.cfg.CONF.set_override('ipv6_dvr_exposure_mode', mode,
+                                       group='ovn')
+        if address_scope_ids is not None:
+            ovn_conf.cfg.CONF.set_override('ipv6_dvr_address_scope_ids',
+                                           address_scope_ids, group='ovn')
 
     def test_ovn_nb_sync_calculate_ipv6_dvr_add_nat_rules(self):
-
-        # add 1 nat rule to ovn
-        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
-                                       group='ovn')
-        ovn_nat = []
-        db_nat = {'name': 'neutron-r1',
-                  'id': 'r1',
-                  'ports':
-                      {'p1r1':
-                          {'fixed_ips':
-                              [{'subnet_id': 'subnet1',
-                                'ip_address': '2001:db8:1234::22'}],
-                           'id': 'p1r1',
-                           'device_id': 'neutron-r1',
-                           'mac_address': '01:01:01:01:01:01'}},
-                  'static_routes': [],
-                  'snats': [],
-                  'dnat_and_snats': [{
-                      'external_ip': '2001:db8:1234::22',
-                      'logical_ip': '2001:db8:1234::22',
-                      'type': 'dnat_and_snat',
-                      'external_ids': {}}]}
-
-        fake_lrouter = fakes.FakeOvsdbRow.create_one_ovsdb_row(
-            attrs=db_nat)
-
-        expected_added = [{'ip': '2001:db8:1234::22',
-                           'data': {'id': 'p1r1',
-                                    'fixed_ips': [
-                                        {'subnet_id': 'subnet1',
-                                        'ip_address': '2001:db8:1234::22'}],
-                                    'network_id': 'network-r1',
-                                    'device_owner': 'compute:nova',
-                                    'device_id': 'neutron-r1',
-                                    'mac_address': '01:01:01:01:01:01'}}]
-        expected_deleted = []
-        self._test_ovn_nb_sync_calculate_ipv6_dvr_helper(ovn_nat,
-                                                         fake_lrouter,
-                                                         expected_added,
-                                                         expected_deleted,
-                                                         True)
+        # The fixtures use the 2001:db8::/32 documentation prefix, which is
+        # not a GUA and would be filtered out by the default "gua" mode.
+        self._enable_dvr_ipv6(mode='all')
+        to_add, to_remove = self._calculate_ipv6_dvr_differences()
+        self.assertEqual(
+            [{'ip': '2001:db8:1234::22',
+              'data': {'id': 'p1r1',
+                       'fixed_ips': [{'subnet_id': 'subnet1',
+                                      'ip_address': '2001:db8:1234::22'}],
+                       'network_id': 'network-r1',
+                       'device_owner': 'compute:nova',
+                       'device_id': 'neutron-r1',
+                       'mac_address': '01:01:01:01:01:01'}}],
+            to_add)
+        self.assertEqual([], to_remove)
 
     def test_ovn_nb_sync_calculate_ipv6_dvr_del_nat_rules(self):
+        self._enable_dvr_ipv6(mode='all')
+        ovn_nats = [{'external_ip': '2001:db8:1234::22',
+                     'logical_ip': '2001:db8:1234::22',
+                     'type': 'dnat_and_snat',
+                     'external_ids': {}}]
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ovn_nats=ovn_nats, fake_ports=False)
+        self.assertEqual([], to_add)
+        self.assertEqual([{'ip': '2001:db8:1234::22',
+                           'data': 'neutron-r1'}], to_remove)
 
-        # del 1 nat ovn rules
-        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', 'True',
+    def test_ovn_nb_sync_calculate_ipv6_dvr_disabled(self):
+        ovn_conf.cfg.CONF.set_override('enable_distributed_ipv6', False,
                                        group='ovn')
-        ovn_nat = [{'external_ip': '2001:db8:1234::22',
-                   'logical_ip': '2001:db8:1234::22',
-                   'type': 'dnat_and_snat',
-                   'external_ids': {}}]
+        to_add, to_remove = self._calculate_ipv6_dvr_differences()
+        self.assertEqual([], to_add)
+        self.assertEqual([], to_remove)
 
-        db_nat = {'name': 'neutron-r1',
-                  'id': 'r1',
-                  'ports':
-                      {'p1r1':
-                          {'fixed_ips': [
-                              {'subnet_id': 'subnet1',
-                               'ip_address': '2001:db8:1234::22'}],
-                           'id': 'p1r1',
-                           'device_id': 'neutron-r1',
-                           'mac_address': '01:01:01:01:01:01'}},
-                  'static_routes': [],
-                  'snats': [],
-                  'dnat_and_snats': {}}
+    def test_ovn_nb_sync_calculate_ipv6_dvr_mode_gua_adds_gua(self):
+        self._enable_dvr_ipv6(mode='gua')
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ip_address='2001:4860::22')
+        self.assertEqual(['2001:4860::22'], [nat['ip'] for nat in to_add])
+        self.assertEqual([], to_remove)
 
-        fake_lrouter = fakes.FakeOvsdbRow.create_one_ovsdb_row(
-            attrs=db_nat)
+    def test_ovn_nb_sync_calculate_ipv6_dvr_mode_gua_skips_ula(self):
+        self._enable_dvr_ipv6(mode='gua')
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ip_address='fd00::1')
+        self.assertEqual([], to_add)
+        self.assertEqual([], to_remove)
 
-        expected_added = []
-        expected_deleted = [{'ip': '2001:db8:1234::22',
-                            'data': 'neutron-r1'}]
-        self._test_ovn_nb_sync_calculate_ipv6_dvr_helper(ovn_nat,
-                                                         fake_lrouter,
-                                                         expected_added,
-                                                         expected_deleted,
-                                                         False)
+    def test_ovn_nb_sync_calculate_ipv6_dvr_removes_no_longer_exposed(self):
+        # A rule created while the exposure mode was more permissive must be
+        # reported for removal once the mode no longer covers it.
+        self._enable_dvr_ipv6(mode='gua')
+        ovn_nats = [{'external_ip': 'fd00::1',
+                     'logical_ip': 'fd00::1',
+                     'type': 'dnat_and_snat',
+                     'external_ids': {}}]
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ovn_nats=ovn_nats, ip_address='fd00::1')
+        self.assertEqual([], to_add)
+        self.assertEqual([{'ip': 'fd00::1', 'data': 'neutron-r1'}], to_remove)
+
+    def test_ovn_nb_sync_calculate_ipv6_dvr_mode_address_scope(self):
+        self._enable_dvr_ipv6(mode='address_scope',
+                              address_scope_ids=['scope-1'])
+        # A ULA is exposed as long as its address scope is allowed.
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ip_address='fd00::1',
+            subnet_attrs={'subnetpool_id': 'pool-1'},
+            subnetpools=[{'id': 'pool-1', 'address_scope_id': 'scope-1'}])
+        self.assertEqual(['fd00::1'], [nat['ip'] for nat in to_add])
+        self.assertEqual([], to_remove)
+
+    def test_ovn_nb_sync_calculate_ipv6_dvr_mode_address_scope_other(self):
+        self._enable_dvr_ipv6(mode='address_scope',
+                              address_scope_ids=['scope-1'])
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ip_address='2001:4860::22',
+            subnet_attrs={'subnetpool_id': 'pool-2'})
+        self.assertEqual([], to_add)
+        self.assertEqual([], to_remove)
+
+    def test_ovn_nb_sync_calculate_ipv6_dvr_mode_address_scope_no_pool(self):
+        self._enable_dvr_ipv6(mode='address_scope',
+                              address_scope_ids=['scope-1'])
+        to_add, to_remove = self._calculate_ipv6_dvr_differences(
+            ip_address='2001:4860::22',
+            subnetpools=[{'id': 'pool-1', 'address_scope_id': 'scope-1'}])
+        self.assertEqual([], to_add)
+        self.assertEqual([], to_remove)
 
 
 class TestIsRouterPortChanged(test_mech_driver.OVNMechanismDriverTestCase):
